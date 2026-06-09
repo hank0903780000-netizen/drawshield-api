@@ -81,20 +81,38 @@ def apply_text_redaction(doc, company_name: str):
                     return True
             return False
 
+        def rect_contains_span(rect, span_bbox):
+            """True if rect overlaps significantly with span_bbox (search_for may return partial rect)."""
+            sx0, sy0, sx1, sy1 = span_bbox
+            # x 重疊 且 rect 的 y0 在 span 的 y 範圍內（部分匹配也算）
+            x_overlap = rect.x0 <= sx1 + 2 and rect.x1 >= sx0 - 2
+            y_overlap = rect.y0 <= sy1 and rect.y1 >= sy0
+            return x_overlap and y_overlap
+
         # 找到匹配的 span，並擴展遮蔽同一欄位（相同 x 範圍）的所有文字
         matched_x_bands = []  # [(x0, x1, y0, y1)] 已匹配的欄位範圍
         for name in names:
             # 方法一：search_for（英文/簡單文字效果好）
             rects = page.search_for(name)
             for rect in rects:
-                page.add_redact_annot(rect, fill=(1, 1, 1))
-                matched_x_bands.append((rect.x0 - 5, rect.x1 + 5, rect.y0, rect.y1))
-            # 方法二：span bbox 直接比對（處理 search_for 無法找到的情況）
-            for span in all_spans:
-                if text_matches(span["text"], name):
-                    rect = fitz.Rect(span["bbox"])
+                # 找到 search_for 命中的 span，遮蔽整個 span（不只是部分 rect）
+                span_found = False
+                for span in all_spans:
+                    if rect_contains_span(rect, span["bbox"]):
+                        full_rect = fitz.Rect(span["bbox"])
+                        page.add_redact_annot(full_rect, fill=(1, 1, 1))
+                        matched_x_bands.append((full_rect.x0 - 5, full_rect.x1 + 5, full_rect.y0, full_rect.y1))
+                        span_found = True
+                if not span_found:
                     page.add_redact_annot(rect, fill=(1, 1, 1))
                     matched_x_bands.append((rect.x0 - 5, rect.x1 + 5, rect.y0, rect.y1))
+            # 方法二：span 文字比對（處理 search_for 完全找不到的情況）
+            if not rects:
+                for span in all_spans:
+                    if text_matches(span["text"], name):
+                        full_rect = fitz.Rect(span["bbox"])
+                        page.add_redact_annot(full_rect, fill=(1, 1, 1))
+                        matched_x_bands.append((full_rect.x0 - 5, full_rect.x1 + 5, full_rect.y0, full_rect.y1))
 
         # 遮蔽同一欄位內所有其他文字（英文名稱等）：x 和 y 都必須重疊
         for span in all_spans:
