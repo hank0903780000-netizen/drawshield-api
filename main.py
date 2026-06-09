@@ -96,6 +96,13 @@ def apply_text_redaction(doc, company_name: str):
             y_overlap = rect.y0 <= sy1 and rect.y1 >= sy0
             return x_overlap and y_overlap
 
+        # Auto mode: no company name given → redact ALL text in title block area
+        if not names:
+            for span in all_spans:
+                page.add_redact_annot(fitz.Rect(span["bbox"]), fill=(1, 1, 1))
+            page.apply_redactions()
+            continue
+
         # 找到匹配的 span，並擴展遮蔽同一欄位（相同 x 範圍）的所有文字
         matched_x_bands = []  # [(x0, x1, y0, y1)] 已匹配的欄位範圍
         for name in names:
@@ -582,4 +589,7 @@ async def debug_spans(file: UploadFile = File(...), company_name: str = Form("")
 
 @app.get("/")
 def root():
+    index = Path(__file__).parent / "index.html"
+    if index.exists():
+        return FileResponse(str(index), media_type="text/html")
     return {"status": "ok", "service": "DrawShield API", "version": VERSION}

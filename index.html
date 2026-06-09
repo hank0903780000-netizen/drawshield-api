@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DrawShield — Engineering PDF Tools</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Noto+Sans+TC:wght@400;500;700&family=Noto+Sans+JP:wght@400;500;700&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#08090d;--surface:#0f1017;--surface2:#161820;--border:rgba(255,255,255,0.07);--accent:#d4ff47;--accent2:#47d4ff;--text:#eeeef2;--muted:#5a5a72;--danger:#ff5c47;--font:'Inter',sans-serif}
+body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh;overflow-x:hidden}
+body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(212,255,71,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(212,255,71,.025) 1px,transparent 1px);background-size:44px 44px;pointer-events:none;z-index:0}
+nav{position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;padding:13px 32px;background:rgba(8,9,13,.9);backdrop-filter:blur(16px);border-bottom:1px solid var(--border)}
+.logo{font-size:15px;font-weight:900;letter-spacing:.06em}.logo span{color:var(--accent)}
+.lang-wrap{display:flex;gap:3px}
+.lang-btn{background:none;border:1px solid var(--border);color:var(--muted);font-family:var(--font);font-size:11px;padding:5px 11px;cursor:pointer;border-radius:2px;transition:all .15s;font-weight:500}
+.lang-btn.on{background:var(--accent);color:#000;border-color:var(--accent);font-weight:700}
+.hero{position:relative;z-index:1;max-width:960px;margin:0 auto;padding:72px 32px 56px}
+.eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:10px;color:var(--accent);letter-spacing:.2em;text-transform:uppercase;margin-bottom:22px;font-weight:600}
+.eyebrow::before{content:'';display:inline-block;width:18px;height:1px;background:var(--accent)}
+h1{font-size:clamp(48px,8.5vw,92px);font-weight:900;line-height:.88;letter-spacing:-.04em;margin-bottom:26px}
+h1 .hl{color:var(--accent);display:block}
+.hero-p{font-size:14px;color:var(--muted);max-width:460px;line-height:1.85;margin-bottom:38px}
+.stats{display:flex;gap:36px;flex-wrap:wrap}
+.stat-n{font-size:27px;font-weight:900;color:var(--accent);line-height:1}
+.stat-l{font-size:10px;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;margin-top:3px}
+.tool{position:relative;z-index:1;max-width:960px;margin:0 auto;padding:0 32px 80px}
+.sec-label{font-size:10px;color:var(--muted);letter-spacing:.18em;text-transform:uppercase;margin-bottom:18px;margin-top:6px;display:flex;align-items:center;gap:12px}
+.sec-label::after{content:'';flex:1;height:1px;background:var(--border)}
+.drop{border:1px dashed rgba(212,255,71,.28);background:rgba(212,255,71,.015);border-radius:4px;padding:52px 28px;text-align:center;cursor:pointer;transition:all .22s;margin-bottom:14px}
+.drop:hover,.drop.drag{border-color:var(--accent);background:rgba(212,255,71,.04)}
+.drop-icon{font-size:34px;opacity:.38;margin-bottom:12px}
+.drop-title{font-size:16px;font-weight:700;margin-bottom:5px}
+.drop-sub{font-size:11px;color:var(--muted)}
+.file-list{display:flex;flex-direction:column;gap:7px;margin-bottom:22px}
+.file-item{display:flex;align-items:center;gap:11px;background:var(--surface);border:1px solid var(--border);border-radius:3px;padding:9px 13px;font-size:12px}
+.file-tag{width:26px;height:26px;background:rgba(212,255,71,.1);border-radius:2px;display:flex;align-items:center;justify-content:center;font-size:8px;color:var(--accent);font-weight:800;flex-shrink:0}
+.file-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-sz{font-size:10px;color:var(--muted);white-space:nowrap}
+.file-rm{background:none;border:none;color:var(--muted);cursor:pointer;font-size:17px;line-height:1;padding:1px 3px}
+.file-rm:hover{color:var(--danger)}
+.opts{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:20px}
+.opts-row2{grid-template-columns:repeat(3,1fr)}
+.opt{border:1px solid var(--border);background:var(--surface);border-radius:4px;padding:20px 16px;cursor:pointer;transition:all .18s;position:relative}
+.opt:hover{border-color:rgba(212,255,71,.3);background:var(--surface2)}
+.opt.on{border-color:var(--accent);background:rgba(212,255,71,.05)}
+.opt-check{position:absolute;top:11px;right:11px;width:18px;height:18px;border-radius:50%;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:9px;transition:all .15s}
+.opt.on .opt-check{background:var(--accent);border-color:var(--accent);color:#000;font-weight:800}
+.opt-icon{font-size:22px;margin-bottom:9px}
+.opt-name{font-size:13px;font-weight:700;margin-bottom:5px}
+.opt-desc{font-size:10px;color:var(--muted);line-height:1.65;margin-bottom:13px}
+.opt-price{font-size:19px;font-weight:900;color:var(--accent)}
+.opt-price small{font-size:10px;color:var(--muted);font-weight:400}
+.input-wrap{display:none;flex-direction:column;gap:7px;margin-bottom:18px}
+.input-wrap.show{display:flex}
+.input-lbl{font-size:10px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase}
+.inp{background:var(--surface);border:1px solid var(--border);color:var(--text);font-family:var(--font);font-size:13px;padding:11px 14px;border-radius:3px;width:100%;outline:none;transition:border-color .18s}
+.inp:focus{border-color:var(--accent)}
+.inp::placeholder{color:var(--muted)}
+.input-hint{font-size:10px;color:var(--muted);line-height:1.65}
+.summary{display:none;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:18px 20px;margin-bottom:14px}
+.summary.show{display:block}
+.sum-row{display:flex;justify-content:space-between;padding:6px 0;font-size:12px;border-bottom:1px solid rgba(255,255,255,.04)}
+.sum-row:last-child{border:none;padding-top:14px;margin-top:4px}
+.sum-k{color:var(--muted)}
+.sum-total-k{font-size:14px;font-weight:700}
+.sum-total-v{font-size:24px;font-weight:900;color:var(--accent)}
+.btn-pay{width:100%;padding:17px;background:var(--accent);color:#000;border:none;border-radius:3px;font-family:var(--font);font-size:15px;font-weight:800;cursor:pointer;transition:all .18s;display:flex;align-items:center;justify-content:center;gap:8px}
+.btn-pay:hover{background:#e0ff60;transform:translateY(-1px);box-shadow:0 8px 24px rgba(212,255,71,.18)}
+.btn-pay:disabled{background:var(--surface2);color:var(--muted);cursor:not-allowed;transform:none;box-shadow:none}
+.privacy{margin-top:12px;display:flex;gap:8px;font-size:10px;color:var(--muted);line-height:1.7}
+.progress-wrap{display:none;margin-top:16px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:18px 20px}
+.progress-wrap.show{display:block}
+.progress-title{font-size:13px;font-weight:600;margin-bottom:10px}
+.progress-bar-bg{background:var(--surface2);border-radius:2px;height:4px;overflow:hidden;margin-bottom:8px}
+.progress-bar{height:4px;background:var(--accent);border-radius:2px;width:0%;transition:width .4s ease}
+.progress-files{font-size:11px;color:var(--muted)}
+.success-list{display:none;margin-top:18px;flex-direction:column;gap:8px}
+.success-list.show{display:flex}
+.success-item{background:rgba(71,212,255,.05);border:1px solid rgba(71,212,255,.2);border-radius:4px;padding:16px 20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+.success-name{font-size:13px;font-weight:600;color:var(--accent2)}
+.btn-dl{display:inline-flex;align-items:center;gap:7px;padding:10px 24px;background:var(--accent2);color:#000;border:none;border-radius:3px;font-family:var(--font);font-size:12px;font-weight:800;cursor:pointer;transition:opacity .15s;text-decoration:none}
+.btn-dl:hover{opacity:.85}
+.error-msg{display:none;margin-top:14px;background:rgba(255,92,71,.06);border:1px solid rgba(255,92,71,.25);border-radius:4px;padding:14px 18px;font-size:12px;color:#ff9080}
+.error-msg.show{display:block}
+.how{position:relative;z-index:1;background:var(--surface);border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:68px 32px}
+.how-inner{max-width:960px;margin:0 auto}
+.how h2{font-size:28px;font-weight:800;text-align:center;margin-bottom:44px;letter-spacing:-.02em}
+.steps{display:grid;grid-template-columns:repeat(4,1fr);gap:18px}
+.step{text-align:center;padding:14px 10px}
+.step-n{width:36px;height:36px;border:1px solid var(--accent);border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 13px;font-size:12px;font-weight:800;color:var(--accent)}
+.step-t{font-size:12px;font-weight:700;margin-bottom:6px}
+.step-d{font-size:10px;color:var(--muted);line-height:1.75}
+footer{position:relative;z-index:1;max-width:960px;margin:0 auto;padding:30px 32px;display:flex;justify-content:space-between;font-size:10px;color:var(--muted);flex-wrap:wrap;gap:8px}
+.api-banner{position:relative;z-index:1;max-width:960px;margin:0 auto;padding:0 32px 0}
+.api-note{background:rgba(212,255,71,.05);border:1px solid rgba(212,255,71,.2);border-radius:3px;padding:10px 14px;font-size:11px;color:var(--accent);margin-bottom:0;display:flex;align-items:center;gap:8px}
+@media(max-width:680px){
+  .hero{padding:56px 20px 44px}.tool{padding:0 20px 64px}
+  .opts{grid-template-columns:1fr}.opts-row2{grid-template-columns:1fr}
+  .steps{grid-template-columns:repeat(2,1fr)}
+  nav{padding:12px 20px}.how{padding:52px 20px}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">DRAW<span>SHIELD</span></div>
+  <div class="lang-wrap">
+    <button class="lang-btn on" onclick="setLang('zh')">中文</button>
+    <button class="lang-btn" onclick="setLang('ja')">日本語</button>
+    <button class="lang-btn" onclick="setLang('en')">EN</button>
+  </div>
+</nav>
+
+<div class="api-banner">
+  <div class="api-note" id="apiBanner">
+    ⚙️ <span id="apiStatus">正在連線後端...</span>
+  </div>
+</div>
+
+<section class="hero">
+  <div class="eyebrow" data-k="tag">工程圖面保護工具</div>
+  <h1>DRAW<span class="hl">SHIELD</span></h1>
+  <p class="hero-p" data-k="heroDesc">發包前保護客戶資料。旋轉圖面方向、遮蔽公司名稱與 LOGO，30 秒完成，處理後自動刪檔。</p>
+  <div class="stats">
+    <div><div class="stat-n">30s</div><div class="stat-l" data-k="s1">處理時間</div></div>
+    <div><div class="stat-n">100%</div><div class="stat-l" data-k="s2">處理後刪檔</div></div>
+    <div><div class="stat-n">$3~</div><div class="stat-l" data-k="s3">起，按份計費</div></div>
+  </div>
+</section>
+
+<section class="tool">
+  <div class="sec-label" data-k="step1">01 — 上傳 PDF</div>
+  <div class="drop" id="drop" onclick="document.getElementById('fi').click()">
+    <div class="drop-icon">📄</div>
+    <div class="drop-title" data-k="upTitle">拖曳或點擊上傳 PDF</div>
+    <div class="drop-sub" data-k="upSub">支援多份 PDF，單份不超過 50MB</div>
+    <input type="file" id="fi" accept=".pdf,.jpg,.jpeg,.png" multiple style="display:none">
+  </div>
+  <div class="file-list" id="fl"></div>
+
+  <div class="sec-label" data-k="step2">02 — 選擇處理方式</div>
+  <div class="opts opts-row2" id="opts-grid">
+    <div class="opt" id="o-rotate" onclick="pick('rotate')">
+      <div class="opt-check">✓</div>
+      <div class="opt-icon">↻</div>
+      <div class="opt-name" data-k="o1n">旋轉方向</div>
+      <div class="opt-desc" data-k="o1d">將圖面旋轉至正確閱讀方向，支援 90° / 180° / 270°</div>
+      <div class="opt-price">$3 <small data-k="per">/ 份</small></div>
+    </div>
+    <div class="opt" id="o-redact" onclick="pick('redact')">
+      <div class="opt-check">✓</div>
+      <div class="opt-icon">⊘</div>
+      <div class="opt-name" data-k="o2n">遮蔽公司名稱和 LOGO</div>
+      <div class="opt-desc" data-k="o2d">永久移除圖框內的公司名稱與 LOGO 圖片，保護客戶資訊</div>
+      <div class="opt-price">$3 <small data-k="per">/ 份</small></div>
+    </div>
+    <div class="opt" id="o-full" onclick="pick('full')">
+      <div class="opt-check">✓</div>
+      <div class="opt-icon">🛡</div>
+      <div class="opt-name" data-k="o3n">旋轉 + 遮蔽公司名稱和 LOGO</div>
+      <div class="opt-desc" data-k="o3d">一次完成旋轉、遮蔽公司名稱與 LOGO，最完整</div>
+      <div class="opt-price">$5 <small data-k="per">/ 份</small></div>
+    </div>
+  </div>
+
+  <div class="input-wrap" id="iw-redact">
+    <div class="input-lbl" data-k="rlabel">要遮蔽的公司名稱</div>
+    <input class="inp" id="cname" type="text" data-k-ph="rph" placeholder="例：威光自動化科技股份有限公司">
+    <div class="input-hint" data-k="rhint">輸入圖面上的完整公司名稱，系統自動尋找並遮蔽所有頁面。TEL/FAX 電話欄位自動偵測遮蔽。多個關鍵字用逗號分隔。</div>
+  </div>
+  <div class="input-wrap" id="iw-rotate">
+    <div class="input-lbl" data-k="rotlabel">旋轉方向</div>
+    <select class="inp" id="rotdir">
+      <option value="90" data-k="r90">順時針 90°</option>
+      <option value="270" data-k="r270">逆時針 90°</option>
+      <option value="180" data-k="r180">180°</option>
+    </select>
+  </div>
+
+  <div class="sec-label" data-k="step3">03 — 確認付款</div>
+  <div class="summary" id="sumbox">
+    <div class="sum-row"><span class="sum-k" data-k="sf">文件數量</span><span id="sv-files">—</span></div>
+    <div class="sum-row"><span class="sum-k" data-k="ss">服務項目</span><span id="sv-svc">—</span></div>
+    <div class="sum-row"><span class="sum-k" data-k="sd">處理後刪檔</span><span data-k="sdv">✓ 60秒內刪除</span></div>
+    <div class="sum-row"><span class="sum-k sum-total-k" data-k="st">合計</span><span class="sum-total-v" id="sv-total">$0</span></div>
+  </div>
+
+  <button class="btn-pay" id="paybtn" disabled onclick="doPay()">
+    <span>💳</span><span id="pay-label" data-k="selectFirst">請先選擇文件與服務</span>
+  </button>
+
+  <div class="privacy">
+    <span>🔒</span>
+    <span data-k="privacy">檔案處理完成後 60 秒內從伺服器永久刪除。付款由 Stripe 加密處理。</span>
+  </div>
+
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-title" id="progressTitle">處理中...</div>
+    <div class="progress-bar-bg"><div class="progress-bar" id="progressBar"></div></div>
+    <div class="progress-files" id="progressFiles"></div>
+  </div>
+
+  <div class="error-msg" id="errMsg"></div>
+  <div class="success-list" id="successList"></div>
+</section>
+
+<section class="how">
+  <div class="how-inner">
+    <h2 data-k="howTitle">如何運作</h2>
+    <div class="steps">
+      <div class="step"><div class="step-n">01</div><div class="step-t" data-k="h1t">上傳圖面</div><div class="step-d" data-k="h1d">拖曳或點擊上傳 PDF 工程圖面</div></div>
+      <div class="step"><div class="step-n">02</div><div class="step-t" data-k="h2t">選擇服務</div><div class="step-d" data-k="h2d">旋轉、遮蔽公司名稱、LOGO，或全部同時</div></div>
+      <div class="step"><div class="step-n">03</div><div class="step-t" data-k="h3t">付款</div><div class="step-d" data-k="h3d">信用卡安全付款，每份文件按服務計費</div></div>
+      <div class="step"><div class="step-n">04</div><div class="step-t" data-k="h4t">下載 & 刪檔</div><div class="step-d" data-k="h4d">立即下載，60 秒後伺服器自動刪檔</div></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <span>© 2025 DrawShield</span>
+  <span data-k="foot">隱私政策 · 使用條款</span>
+</footer>
+
+<script>
+const API_BASE = "https://enchanting-integrity-production-36f6.up.railway.app";
+
+const T={
+  zh:{tag:'工程圖面保護工具',heroDesc:'發包前保護客戶資料。旋轉圖面方向、遮蔽公司名稱與 LOGO，30 秒完成，處理後自動刪檔。',s1:'處理時間',s2:'處理後刪檔',s3:'起，按份計費',step1:'01 — 上傳 PDF',step2:'02 — 選擇處理方式',step3:'03 — 確認付款',upTitle:'拖曳或點擊上傳 PDF',upSub:'支援多份 PDF，單份不超過 50MB',o1n:'旋轉方向',o1d:'將圖面旋轉至正確閱讀方向，支援 90° / 180° / 270°',o2n:'遮蔽公司名稱和 LOGO',o2d:'永久移除圖框內的公司名稱與 LOGO 圖片，保護客戶資訊',o3n:'旋轉 + 遮蔽公司名稱和 LOGO',o3d:'一次完成旋轉、遮蔽公司名稱與 LOGO，最完整',per:'/ 份',rlabel:'要遮蔽的公司名稱',rph:'例：威光自動化科技股份有限公司',rhint:'輸入圖面上的完整公司名稱，系統自動尋找並遮蔽所有頁面。多個名稱用逗號分隔。',rotlabel:'旋轉方向',r90:'順時針 90°',r270:'逆時針 90°',r180:'180°',sf:'文件數量',ss:'服務項目',sd:'處理後刪檔',sdv:'✓ 60秒內刪除',st:'合計',selectFirst:'請先選擇文件與服務',privacy:'檔案處理完成後 60 秒內從伺服器永久刪除。付款由 Stripe 加密處理。',howTitle:'如何運作',h1t:'上傳圖面',h1d:'拖曳或點擊上傳 PDF 工程圖面',h2t:'選擇服務',h2d:'旋轉、遮蔽公司名稱與 LOGO，或兩者同時',h3t:'付款',h3d:'信用卡安全付款，每份文件按服務計費',h4t:'下載 & 刪檔',h4d:'立即下載，60 秒後伺服器自動刪檔',foot:'隱私政策 · 使用條款',svcRotate:'旋轉方向',svcRedact:'遮蔽公司名稱和 LOGO',svcFull:'旋轉 + 遮蔽公司名稱和 LOGO',processing:'上傳中',processingPaid:'處理中',done:'✓ 處理完成，點擊下載',errNet:'網路錯誤，請稍後再試',dlBtn:'下載',uploading:'上傳檔案中'},
+  ja:{tag:'製造図面セキュリティツール',heroDesc:'外注前に顧客情報を保護。図面の向き変更・会社名・LOGOの墨消しを30秒で完了。処理後は自動削除。',s1:'処理時間',s2:'処理後自動削除',s3:'〜、1件単位',step1:'01 — PDFをアップロード',step2:'02 — 処理方法を選択',step3:'03 — お支払い確認',upTitle:'ドラッグまたはクリックしてアップロード',upSub:'複数PDF対応、1件50MBまで',o1n:'向き変更',o1d:'図面を正しい向きに回転。90° / 180° / 270° 対応',o2n:'会社名・LOGOを墨消し',o2d:'図枠内の会社名とLOGO画像を完全削除し顧客情報を保護',o3n:'回転 + 会社名・LOGO墨消し',o3d:'回転・会社名・LOGOの墨消しを同時処理。最も完全',per:'/ 件',rlabel:'墨消しする会社名',rph:'例：MAS Automation Corp.',rhint:'図面上の会社名をそのまま入力。全ページから自動検出・削除します。複数はカンマ区切り。',rotlabel:'回転方向',r90:'時計回り 90°',r270:'反時計回り 90°',r180:'180°',sf:'ファイル数',ss:'サービス',sd:'処理後削除',sdv:'✓ 即時削除',st:'合計',selectFirst:'ファイルとサービスを選択してください',privacy:'処理完了後60秒以内にサーバーから完全削除。お支払いはStripeで暗号化処理。',howTitle:'利用の流れ',h1t:'図面をアップロード',h1d:'PDFをドラッグ＆ドロップまたはクリックでアップロード',h2t:'サービスを選択',h2d:'回転・墨消し、またはその両方を選択',h3t:'お支払い',h3d:'クレジットカードで安全決済。1件ごとの従量課金',h4t:'ダウンロード & 削除',h4d:'すぐにダウンロード。60秒後にサーバーから削除',foot:'プライバシーポリシー · 利用規約',svcRotate:'向き変更',svcRedact:'会社名・LOGO墨消し',svcFull:'回転 + 会社名・LOGO墨消し',processing:'アップロード中',processingPaid:'処理中',done:'✓ 処理完了、ダウンロード',errNet:'ネットワークエラーが発生しました',dlBtn:'ダウンロード',uploading:'ファイルをアップロード中'},
+  en:{tag:'Engineering Drawing Protection',heroDesc:'Protect client data before outsourcing. Rotate drawings, redact company names and LOGOs — 30 seconds. Auto-deleted after processing.',s1:'Processing time',s2:'Auto-deleted',s3:'Starting from',step1:'01 — Upload PDF',step2:'02 — Choose Service',step3:'03 — Confirm & Pay',upTitle:'Drag & drop or click to upload PDF',upSub:'Multiple PDFs supported, 50MB per file',o1n:'Rotate',o1d:'Rotate to correct reading orientation. 90° / 180° / 270°',o2n:'Redact Company Name & LOGO',o2d:'Permanently remove company name and LOGO from title block',o3n:'Rotate + Redact Name & LOGO',o3d:'Rotate, redact company name and LOGO in one step. Most complete.',per:'/ file',rlabel:'Company name to redact',rph:'e.g. MAS Automation Corp.',rhint:'Enter exact name as shown on drawing. Finds and redacts all pages. Separate multiple with commas.',rotlabel:'Rotation',r90:'Clockwise 90°',r270:'Counter-clockwise 90°',r180:'180°',sf:'Files',ss:'Service',sd:'Auto-delete',sdv:'✓ Within 60s',st:'Total',selectFirst:'Select files and service first',privacy:'Files permanently deleted within 60 seconds. Payment encrypted by Stripe.',howTitle:'How It Works',h1t:'Upload Drawing',h1d:'Drag & drop or click to upload PDF engineering drawings',h2t:'Choose Service',h2d:'Rotation, redaction, or both',h3t:'Pay',h3d:'Secure credit card payment, billed per file',h4t:'Download & Delete',h4d:'Download immediately. Auto-deleted in 60 seconds',foot:'Privacy Policy · Terms of Use',svcRotate:'Rotation',svcRedact:'Redact Name & LOGO',svcFull:'Rotate + Redact Name & LOGO',processing:'Uploading',processingPaid:'Processing',done:'✓ Done — click to download',errNet:'Network error, please try again',dlBtn:'Download',uploading:'Uploading files'}
+};
+
+const PRICE={rotate:3,redact:3,full:5};
+let lang='zh',opt=null,files=[];
+
+function setLang(l){
+  lang=l;
+  document.querySelectorAll('.lang-btn').forEach(b=>b.classList.toggle('on',b.getAttribute('onclick').includes("'"+l+"'")));
+  const t=T[l];
+  document.querySelectorAll('[data-k]').forEach(el=>{const k=el.getAttribute('data-k');if(t[k]!==undefined)el.textContent=t[k]});
+  document.querySelectorAll('[data-k-ph]').forEach(el=>{const k=el.getAttribute('data-k-ph');if(t[k]!==undefined)el.placeholder=t[k]});
+  document.querySelectorAll('option[data-k]').forEach(el=>{const k=el.getAttribute('data-k');if(t[k]!==undefined)el.textContent=t[k]});
+  updateUI();
+}
+
+function pick(o){
+  opt=o;
+  ['rotate','redact','full'].forEach(x=>document.getElementById('o-'+x).classList.toggle('on',x===o));
+  document.getElementById('iw-redact').classList.toggle('show',o==='redact'||o==='full');
+  document.getElementById('iw-rotate').classList.toggle('show',o==='rotate'||o==='full');
+  updateUI();
+}
+
+function svcLabel(t){
+  const map={rotate:t.svcRotate,redact:t.svcRedact,full:t.svcFull};
+  return map[opt]||'';
+}
+
+function updateUI(){
+  const t=T[lang];
+  const canPay=files.length>0&&opt!==null;
+  const total=(PRICE[opt]||0)*files.length;
+  const btn=document.getElementById('paybtn');
+  btn.disabled=!canPay;
+  document.getElementById('pay-label').textContent=canPay?'💳  Pay — $'+total+' USD':t.selectFirst;
+  document.getElementById('sumbox').classList.toggle('show',canPay);
+  if(canPay){
+    document.getElementById('sv-files').textContent=files.length;
+    document.getElementById('sv-svc').textContent=svcLabel(t);
+    document.getElementById('sv-total').textContent='$'+total+' USD';
+  }
+}
+
+function renderFiles(){
+  const fl=document.getElementById('fl');
+  fl.innerHTML='';
+  files.forEach((f,i)=>{
+    const d=document.createElement('div');d.className='file-item';
+    d.innerHTML=`<div class="file-tag">PDF</div><span class="file-name">${f.name}</span><span class="file-sz">${(f.size/1024/1024).toFixed(1)}MB</span><button class="file-rm" onclick="rmFile(${i})">×</button>`;
+    fl.appendChild(d);
+  });
+  updateUI();
+}
+
+function rmFile(i){files.splice(i,1);renderFiles();}
+function addFiles(list){
+  const names=new Set(files.map(f=>f.name));
+  Array.from(list).filter(f=>/\.(pdf|jpg|jpeg|png)$/i.test(f.name)&&!names.has(f.name)).forEach(f=>files.push(f));
+  renderFiles();
+}
+
+// ── Upload files to /upload, then redirect to Stripe ───────────────────────
+
+async function doPay(){
+  const t=T[lang];
+  const errEl=document.getElementById('errMsg');
+  const progWrap=document.getElementById('progressWrap');
+  const progBar=document.getElementById('progressBar');
+  const progTitle=document.getElementById('progressTitle');
+  const progFiles=document.getElementById('progressFiles');
+  const successList=document.getElementById('successList');
+
+  errEl.classList.remove('show');
+
+  // Validate: redact service requires company name
+  if((opt==='redact'||opt==='full')&&!document.getElementById('cname').value.trim()){
+    errEl.textContent=t.errNoCname||(lang==='zh'?'請輸入要遮蔽的公司名稱。':'Please enter the company name to redact.');
+    errEl.classList.add('show');
+    return;
+  }
+  if(!files.length){
+    errEl.textContent=t.errNoFile||(lang==='zh'?'請先上傳檔案。':'Please upload a file first.');
+    errEl.classList.add('show');
+    return;
+  }
+
+  successList.innerHTML='';
+  successList.classList.remove('show');
+  progWrap.classList.add('show');
+  document.getElementById('paybtn').disabled=true;
+
+  // Step 1: Upload all files to staging
+  const uploadIds=[];
+  const fileNames={};
+  for(let i=0;i<files.length;i++){
+    const f=files[i];
+    progTitle.textContent=`${t.uploading} ${i+1}/${files.length}`;
+    progFiles.textContent=f.name;
+    progBar.style.width=((i/files.length)*80)+'%';
+
+    try{
+      const fd=new FormData();
+      fd.append('file',f);
+      const res=await fetch(API_BASE+'/upload',{method:'POST',body:fd});
+      if(!res.ok)throw new Error('upload failed '+res.status);
+      const data=await res.json();
+      uploadIds.push(data.upload_id);
+      fileNames[data.upload_id]=f.name;
+    }catch(e){
+      showError('❌ '+f.name+': '+t.errNet);
+      document.getElementById('paybtn').disabled=false;
+      return;
+    }
+  }
+
+  progBar.style.width='85%';
+  progTitle.textContent='導向付款頁面...';
+  progFiles.textContent='';
+
+  // Store filenames for later
+  sessionStorage.setItem('ds_filenames', JSON.stringify(fileNames));
+
+  // Step 2: Create Stripe checkout
+  try{
+    const res=await fetch(API_BASE+'/create-checkout',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        upload_ids:uploadIds,
+        service:opt,
+        rotate_deg:document.getElementById('rotdir').value,
+        company_name:document.getElementById('cname').value,
+      })
+    });
+    if(!res.ok){
+      // Stripe not configured — fall back to direct processing (dev mode)
+      if(res.status===503){
+        progTitle.textContent=t.processingPaid;
+        await processWithIds(uploadIds,'',opt,
+          document.getElementById('rotdir').value,
+          document.getElementById('cname').value,
+          t, progBar, progTitle, progFiles, successList);
+        return;
+      }
+      throw new Error('checkout error '+res.status);
+    }
+    const data=await res.json();
+    progBar.style.width='100%';
+    window.location.href=data.checkout_url;
+  }catch(e){
+    showError('❌ '+t.errNet+' ('+e.message+')');
+    document.getElementById('paybtn').disabled=false;
+  }
+}
+
+// ── After Stripe redirects back ─────────────────────────────────────────────
+
+async function handlePaidReturn(){
+  const params=new URLSearchParams(window.location.search);
+  if(!params.get('paid'))return;
+
+  const sessionId=params.get('session_id')||'';
+  const uploadIds=(params.get('upload_ids')||'').split('|').filter(Boolean);
+  const service=params.get('service')||'rotate';
+  const rotateDeg=params.get('rotate_deg')||'90';
+  const cname=decodeURIComponent(params.get('cname')||'');
+
+  // Clean URL
+  window.history.replaceState({},'','/');
+
+  if(!uploadIds.length){
+    showError('找不到待處理的檔案，請重新上傳。');
+    return;
+  }
+
+  const t=T[lang];
+  const progWrap=document.getElementById('progressWrap');
+  const progBar=document.getElementById('progressBar');
+  const progTitle=document.getElementById('progressTitle');
+  const progFiles=document.getElementById('progressFiles');
+  const successList=document.getElementById('successList');
+
+  progWrap.classList.add('show');
+  progTitle.textContent=t.processingPaid;
+  progBar.style.width='10%';
+  successList.innerHTML='';
+  successList.classList.remove('show');
+
+  await processWithIds(uploadIds, sessionId, service, rotateDeg, cname,
+    t, progBar, progTitle, progFiles, successList);
+}
+
+async function processWithIds(uploadIds, sessionId, service, rotateDeg, cname,
+  t, progBar, progTitle, progFiles, successList){
+  try{
+    const res=await fetch(API_BASE+'/process-paid',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        session_id:sessionId,
+        upload_ids:uploadIds,
+        service:service,
+        rotate_deg:parseInt(rotateDeg),
+        company_name:cname,
+      })
+    });
+    if(!res.ok){
+      const err=await res.json().catch(()=>({detail:'未知錯誤'}));
+      throw new Error(err.detail||res.status);
+    }
+    const data=await res.json();
+
+    progBar.style.width='100%';
+    progTitle.textContent=t.done;
+    progFiles.textContent='';
+
+    const fileNames=JSON.parse(sessionStorage.getItem('ds_filenames')||'{}');
+    successList.classList.add('show');
+    data.results.forEach(r=>{
+      const name=fileNames[r.upload_id]||r.upload_id;
+      const div=document.createElement('div');div.className='success-item';
+      div.innerHTML=`<span class="success-name">✓ ${name}</span><a class="btn-dl" href="${API_BASE}/download/${r.download_id}" download>⬇ ${t.dlBtn}</a>`;
+      successList.appendChild(div);
+    });
+    successList.scrollIntoView({behavior:'smooth'});
+  }catch(e){
+    showError('❌ 處理失敗：'+e.message);
+  }
+  document.getElementById('paybtn').disabled=false;
+}
+
+function showError(msg){
+  const el=document.getElementById('errMsg');
+  el.textContent=msg;
+  el.classList.add('show');
+  document.getElementById('progressWrap').classList.remove('show');
+}
+
+// ── File input & drag ────────────────────────────────────────────────────────
+document.getElementById('fi').addEventListener('change',e=>addFiles(e.target.files));
+const drop=document.getElementById('drop');
+drop.addEventListener('dragover',e=>{e.preventDefault();drop.classList.add('drag')});
+drop.addEventListener('dragleave',()=>drop.classList.remove('drag'));
+drop.addEventListener('drop',e=>{e.preventDefault();drop.classList.remove('drag');addFiles(e.dataTransfer.files)});
+
+// ── API status check ─────────────────────────────────────────────────────────
+async function checkAPI(){
+  const s=document.getElementById('apiStatus');
+  const b=document.getElementById('apiBanner');
+  try{
+    const r=await fetch(API_BASE+'/',{signal:AbortSignal.timeout(5000)});
+    if(r.ok){
+      s.textContent='✓ 後端已連線，可以開始使用';
+      b.style.background='rgba(71,212,71,.05)';
+      b.style.borderColor='rgba(71,212,71,.2)';
+      b.style.color='#80ff80';
+    }else throw new Error();
+  }catch{
+    s.textContent='⚠️ 後端連線失敗，請稍後重試';
+    b.style.background='rgba(255,92,71,.06)';
+    b.style.borderColor='rgba(255,92,71,.25)';
+    b.style.color='#ff9080';
+  }
+}
+
+setLang('zh');
+checkAPI();
+handlePaidReturn();
+</script>
+</body>
+</html>
