@@ -51,24 +51,44 @@ async def auto_delete(path: str, delay: int = 60):
 def apply_text_redaction(doc, company_name: str):
     import re
     names = [n.strip() for n in company_name.split(",") if n.strip()]
+    phone_pattern = re.compile(r"(?:TEL|FAX|AX|電話|傳真)\s*[:：]?\s*[\d\-\+\(\) ]{5,}", re.IGNORECASE)
+
     for page in doc:
-        for name in names:
-            rects = page.search_for(name)
-            for rect in rects:
-                page.add_redact_annot(rect, fill=(1, 1, 1))
-        # 自動遮蔽 TEL / FAX / AX 電話號碼欄位（title block 角落）
-        phone_pattern = re.compile(r"(?:TEL|FAX|AX|電話|傳真)\s*[:：]?\s*[\d\-\+\(\) ]{5,}", re.IGNORECASE)
         w, h = page.rect.width, page.rect.height
+        # 收集所有 title block 區域的 span（頁面左側 25% 或下方 25%）
+        all_spans = []
         for b in page.get_text("dict")["blocks"]:
             if b["type"] != 0:
                 continue
             for line in b["lines"]:
                 for span in line["spans"]:
-                    if phone_pattern.search(span["text"]):
-                        x0, y0, x1, y1 = span["bbox"]
-                        # 只遮蔽 title block 區域（頁面左側或下方 25% 範圍）
-                        if x0 < w * 0.25 or y0 > h * 0.75:
-                            page.add_redact_annot(fitz.Rect(span["bbox"]), fill=(1, 1, 1))
+                    x0, y0, x1, y1 = span["bbox"]
+                    if x0 < w * 0.25 or y0 > h * 0.75:
+                        all_spans.append(span)
+
+        # 找到匹配的 span，並擴展遮蔽同一欄位（相同 x 範圍）的所有文字
+        matched_x_bands = []  # [(x0, x1, y0, y1)] 已匹配的欄位範圍
+        for name in names:
+            rects = page.search_for(name)
+            for rect in rects:
+                page.add_redact_annot(rect, fill=(1, 1, 1))
+                # 記錄匹配到的欄位範圍（x 擴展 ±5pt，y 使用原始範圍）
+                matched_x_bands.append((rect.x0 - 5, rect.x1 + 5, rect.y0, rect.y1))
+
+        # 遮蔽同一欄位內所有其他文字（英文名稱等）：x 和 y 都必須重疊
+        for span in all_spans:
+            sx0, sy0, sx1, sy1 = span["bbox"]
+            for bx0, bx1, by0, by1 in matched_x_bands:
+                # span 的 x 範圍與匹配欄位重疊，且 y 範圍也重疊
+                if sx0 <= bx1 and sx1 >= bx0 and sy0 <= by1 and sy1 >= by0:
+                    page.add_redact_annot(fitz.Rect(span["bbox"]), fill=(1, 1, 1))
+                    break
+
+        # 自動遮蔽 TEL / FAX 電話號碼（title block 區域）
+        for span in all_spans:
+            if phone_pattern.search(span["text"]):
+                page.add_redact_annot(fitz.Rect(span["bbox"]), fill=(1, 1, 1))
+
         page.apply_redactions()
 
 
