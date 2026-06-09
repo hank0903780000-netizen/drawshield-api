@@ -67,15 +67,22 @@ def apply_text_redaction(doc, company_name: str):
                     if x0 < w * 0.25 or y0 > h * 0.75:
                         all_spans.append(span)
 
+        def clean_str(s: str) -> str:
+            """Remove surrogate escapes (Linux PyMuPDF encoding artifact)."""
+            return ''.join(c for c in s if ord(c) < 0xD800 or ord(c) > 0xDFFF)
+
         def text_matches(span_text: str, name: str) -> bool:
-            """Check if span_text is related to name — handles partial/broken text streams."""
-            st, n = span_text.strip(), name.strip()
+            """Check if span_text matches name — handles surrogates and partial streams."""
+            st = clean_str(span_text).strip()
+            n = clean_str(name).strip()
             if not st or not n:
                 return False
             if st in n or n in st:
                 return True
-            # 連續 3 個以上字元重疊
-            min_len = min(len(st), len(n), 4)
+            # 任意 2 個以上連續字元重疊（CJK 短字串也能比對）
+            min_len = min(len(st), len(n), 2)
+            if min_len < 2:
+                return False
             for i in range(len(n) - min_len + 1):
                 if n[i:i + min_len] in st:
                     return True
@@ -541,8 +548,9 @@ async def download(job_id: str):
 
 
 @app.post("/debug-spans")
-async def debug_spans(file: UploadFile = File(...)):
-    """Debug: return all title block spans from uploaded PDF."""
+async def debug_spans(file: UploadFile = File(...), company_name: str = Form("")):
+    """Debug: return title block spans and search_for results."""
+    import re as _re
     data = await file.read()
     doc = fitz.open(stream=data, filetype="pdf")
     page = doc[0]
@@ -554,13 +562,22 @@ async def debug_spans(file: UploadFile = File(...)):
                 for span in line["spans"]:
                     x0,y0,x1,y1 = span["bbox"]
                     if x0 < w*0.25 and y0 > 550:
+                        txt = span["text"]
+                        clean = ''.join(c for c in txt if ord(c) < 0xD800 or ord(c) > 0xDFFF)
                         spans.append({
-                            "text": span["text"],
-                            "repr": repr(span["text"]),
-                            "codepoints": [hex(ord(c)) for c in span["text"][:6]],
+                            "text": txt,
+                            "clean": clean,
+                            "codepoints": [hex(ord(c)) for c in txt[:8]],
                             "bbox": [round(v,1) for v in span["bbox"]],
                         })
-    return {"spans": spans}
+    search_results = {}
+    if company_name:
+        for name in company_name.split(","):
+            name = name.strip()
+            if name:
+                rects = page.search_for(name)
+                search_results[name] = [[round(v,1) for v in r] for r in rects]
+    return {"spans": spans, "search_results": search_results}
 
 
 @app.get("/")
