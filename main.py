@@ -38,7 +38,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "ffc4016-surrogate-fix"
+VERSION = "a7744a0-auto-redact"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -589,7 +589,4 @@ async def debug_spans(file: UploadFile = File(...), company_name: str = Form("")
 
 @app.get("/")
 def root():
-    index = Path(__file__).parent / "index.html"
-    if index.exists():
-        return FileResponse(str(index), media_type="text/html")
     return {"status": "ok", "service": "DrawShield API", "version": VERSION}
