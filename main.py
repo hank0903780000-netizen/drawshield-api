@@ -4,8 +4,16 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 import fitz
 import stripe
-import uuid, os, asyncio
+import uuid, os, asyncio, io
 from pathlib import Path
+from PIL import Image, ImageDraw
+import numpy as np
+
+try:
+    import pytesseract
+    TESSERACT_OK = True
+except ImportError:
+    TESSERACT_OK = False
 
 app = FastAPI()
 
@@ -53,6 +61,9 @@ def apply_text_redaction(doc, company_name: str):
 def apply_logo_redaction(doc):
     for page in doc:
         page_area = page.rect.width * page.rect.height
+        redacted = False
+
+        # ── 嵌入式點陣圖 ────────────────────────────────────────────────
         img_list = page.get_images(full=True)
         for img in img_list:
             xref = img[0]
@@ -62,42 +73,243 @@ def apply_logo_redaction(doc):
                 continue
             for rect in rects:
                 img_area = rect.width * rect.height
-                # Skip full-page images (scanned PDFs where whole page is one image)
                 if page_area > 0 and img_area / page_area > 0.5:
                     continue
                 page.add_redact_annot(rect, fill=(1, 1, 1))
-        page.apply_redactions()
+                redacted = True
+
+        # ── 向量 LOGO：找 title block 欄位內的有色路徑 ──────────────────
+        # 策略：title block 通常是圖面邊緣的窄欄/窄列。
+        # 工程圖標注（尺寸線）分布在主圖區；title block 的有色路徑（LOGO）
+        # 通常集中在某個小區域，與主圖區有明顯距離。
+        # 做法：找所有「完全不在主圖區」的有色路徑群集。
+        drawings = page.get_drawings()
+
+        # 先估算主圖區邊界（文字的主要分布區域，排除 title block 文字）
+        # 方法：找最密集的文字 x/y 範圍
+        all_text = []
+        for b in page.get_text("dict")["blocks"]:
+            if b["type"] == 0:
+                all_text.append(b["bbox"])
+
+        # 收集有色路徑，按「群集」分組
+        colored_paths = []
+        for d in drawings:
+            c = d.get("color") or d.get("fill")
+            if c is None:
+                continue
+            r, g, b = c[0], c[1], c[2]
+            if (r < 0.1 and g < 0.1 and b < 0.1) or (r > 0.9 and g > 0.9 and b > 0.9):
+                continue
+            dr = fitz.Rect(d["rect"])
+            area = dr.width * dr.height
+            if page_area > 0 and area / page_area > 0.3:
+                continue
+            colored_paths.append(dr)
+
+        # 用 DBSCAN 概念：把距離相近的有色路徑合併成群
+        CLUSTER_DIST = 40  # pt，同一群的最大距離
+        groups = []
+        used = set()
+        for i, p in enumerate(colored_paths):
+            if i in used:
+                continue
+            group = [p]
+            used.add(i)
+            for j, q in enumerate(colored_paths):
+                if j in used:
+                    continue
+                # 距離 = 兩個 rect 的 center 距離
+                cx1 = (p.x0 + p.x1) / 2
+                cy1 = (p.y0 + p.y1) / 2
+                cx2 = (q.x0 + q.x1) / 2
+                cy2 = (q.y0 + q.y1) / 2
+                if abs(cx1 - cx2) < CLUSTER_DIST and abs(cy1 - cy2) < CLUSTER_DIST:
+                    group.append(q)
+                    used.add(j)
+            groups.append(group)
+
+        # 找面積小且位於頁面邊緣（title block 區）的群集作為 LOGO 候選
+        pw = page.rect.width
+        ph = page.rect.height
+        EDGE = 0.18  # 邊緣 18% 範圍視為 title block 區域
+        logo_annots = []
+        for group in groups:
+            xs2 = [r.x0 for r in group] + [r.x1 for r in group]
+            ys2 = [r.y0 for r in group] + [r.y1 for r in group]
+            merged = fitz.Rect(min(xs2), min(ys2), max(xs2), max(ys2))
+            area = merged.width * merged.height
+            if page_area > 0 and area / page_area >= 0.02:
+                continue  # 太大，是主圖標注群
+            # 必須位於頁面任意一側邊緣（title block 所在位置）
+            in_edge = (
+                merged.x1 < pw * EDGE or merged.x0 > pw * (1 - EDGE) or
+                merged.y1 < ph * EDGE or merged.y0 > ph * (1 - EDGE)
+            )
+            if in_edge:
+                logo_annots.append(merged)
+
+        for rect in logo_annots:
+            page.add_redact_annot(rect, fill=(1, 1, 1))
+            redacted = True
+
+        if redacted:
+            page.apply_redactions()
+
+
+def is_scanned_page(page) -> bool:
+    """頁面是否為純掃描圖片（無文字層、只有一張全頁圖片）。"""
+    if page.get_text().strip():
+        return False
+    imgs = page.get_images(full=True)
+    if len(imgs) == 0:
+        return False
+    try:
+        page_area = page.rect.width * page.rect.height
+        for img in imgs:
+            rects = page.get_image_rects(img[0])
+            for r in rects:
+                if page_area > 0 and r.width * r.height / page_area > 0.7:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def redact_scanned_page(doc, page_num: int, company_name: str, do_logo: bool, do_text: bool):
+    """對掃描頁面做影像層面的遮蔽，再替換回 PDF。"""
+    page = doc[page_num]
+    SCALE = 2.0
+    mat = fitz.Matrix(SCALE, SCALE)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
+    dirty = False
+
+    # ── 公司名稱：OCR 偵測 ──────────────────────────────────────────────
+    if do_text and company_name.strip() and TESSERACT_OK:
+        names = [n.strip() for n in company_name.split(",") if n.strip()]
+        try:
+            data = pytesseract.image_to_data(
+                img, lang="chi_tra+chi_sim+eng",
+                output_type=pytesseract.Output.DICT,
+                config="--psm 11",
+            )
+            for name in names:
+                # 嘗試在 OCR 輸出中找到完整或部分匹配
+                full_text = " ".join(t for t in data["text"] if t.strip())
+                # 逐個 token 查找
+                for i, token in enumerate(data["text"]):
+                    if not token.strip() or data["conf"][i] < 10:
+                        continue
+                    if token in name or name in token:
+                        x, y = data["left"][i], data["top"][i]
+                        bw, bh = data["width"][i], data["height"][i]
+                        draw.rectangle([x - 3, y - 3, x + bw + 3, y + bh + 3], fill="white")
+                        dirty = True
+        except Exception:
+            pass
+
+    # ── LOGO：顏色偵測（在頁面四個角落的 title block 區）──────────────
+    if do_logo:
+        arr = np.array(img)
+        CORNER = 0.20  # 頁面邊緣 20% 為 title block 候選區
+        regions = [
+            (0,            0,            int(w * CORNER),     int(h * CORNER)),
+            (int(w * (1 - CORNER)), 0,  w,                   int(h * CORNER)),
+            (0,            int(h * (1 - CORNER)), int(w * CORNER), h),
+            (int(w * (1 - CORNER)), int(h * (1 - CORNER)), w, h),
+        ]
+        for rx0, ry0, rx1, ry1 in regions:
+            region = arr[ry0:ry1, rx0:rx1]
+            r_ch, g_ch, b_ch = region[:, :, 0], region[:, :, 1], region[:, :, 2]
+            # 有彩度的像素（非黑白灰）
+            sat = np.maximum(r_ch, np.maximum(g_ch, b_ch)).astype(int) - \
+                  np.minimum(r_ch, np.minimum(g_ch, b_ch)).astype(int)
+            # 也排除過暗（黑色）像素
+            brightness = (r_ch.astype(int) + g_ch.astype(int) + b_ch.astype(int)) // 3
+            colored = (sat > 35) & (brightness > 30)
+            ys_c, xs_c = np.where(colored)
+            if len(xs_c) < 30:
+                continue
+            # 找包圍框並白色遮蔽
+            lx0, lx1 = int(xs_c.min()) + rx0, int(xs_c.max()) + rx0
+            ly0, ly1 = int(ys_c.min()) + ry0, int(ys_c.max()) + ry0
+            draw.rectangle([lx0 - 4, ly0 - 4, lx1 + 4, ly1 + 4], fill="white")
+            dirty = True
+
+    if not dirty:
+        return
+
+    # ── 把修改後的影像寫回 PDF 頁面 ────────────────────────────────────
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+
+    # 建立暫時 doc 取代該頁
+    tmp = fitz.open()
+    tmp_page = tmp.new_page(width=page.rect.width, height=page.rect.height)
+    tmp_page.insert_image(tmp_page.rect, stream=buf.read(), keep_proportion=False)
+
+    doc.delete_page(page_num)
+    doc.insert_pdf(tmp, from_page=0, to_page=0, start_at=page_num)
+    tmp.close()
 
 
 def process_doc(doc, service: str, rotate_deg: int, company_name: str):
-    if service in ("rotate", "full"):
+    do_rotate = service in ("rotate", "full")
+    do_redact = service in ("redact", "full")
+
+    if do_rotate:
         for page in doc:
             page.set_rotation((page.rotation + rotate_deg) % 360)
 
-    if service in ("redact", "full") and company_name.strip():
+    if do_redact:
+        # 先處理向量頁面的文字和 LOGO
         apply_text_redaction(doc, company_name)
-
-    if service in ("redact", "full"):
         apply_logo_redaction(doc)
+
+        # 再處理掃描頁面（影像層）
+        for i in range(len(doc)):
+            if is_scanned_page(doc[i]):
+                redact_scanned_page(doc, i,
+                    company_name=company_name,
+                    do_logo=True,
+                    do_text=bool(company_name.strip())
+                )
 
 
 # ── Upload (pre-payment file staging) ───────────────────────────────────────
 
+ALLOWED_EXTS = {".pdf", ".jpg", ".jpeg", ".png"}
+
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "只接受 PDF 檔案")
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ALLOWED_EXTS:
+        raise HTTPException(400, "只接受 PDF / JPG / PNG 檔案")
 
     upload_id = str(uuid.uuid4())
     stage_path = UPLOAD_DIR / f"{upload_id}_stage.pdf"
-
     content = await file.read()
-    with open(stage_path, "wb") as f:
-        f.write(content)
 
-    # Auto-delete staged file after 30 minutes (enough time for checkout)
+    if ext in (".jpg", ".jpeg", ".png"):
+        # 圖片包裝成 PDF（以 150 DPI 計算頁面大小）
+        pil_img = Image.open(io.BytesIO(content)).convert("RGB")
+        iw, ih = pil_img.size
+        pdf_w = iw * 72 / 150
+        pdf_h = ih * 72 / 150
+        tmp_doc = fitz.open()
+        tmp_page = tmp_doc.new_page(width=pdf_w, height=pdf_h)
+        tmp_page.insert_image(tmp_page.rect, stream=content, keep_proportion=False)
+        tmp_doc.save(str(stage_path))
+        tmp_doc.close()
+    else:
+        with open(stage_path, "wb") as f:
+            f.write(content)
+
     asyncio.create_task(auto_delete(str(stage_path), 1800))
-
     return {"upload_id": upload_id, "filename": file.filename}
 
 
