@@ -49,12 +49,26 @@ async def auto_delete(path: str, delay: int = 60):
 
 
 def apply_text_redaction(doc, company_name: str):
+    import re
     names = [n.strip() for n in company_name.split(",") if n.strip()]
     for page in doc:
         for name in names:
             rects = page.search_for(name)
             for rect in rects:
                 page.add_redact_annot(rect, fill=(1, 1, 1))
+        # 自動遮蔽 TEL / FAX / AX 電話號碼欄位（title block 角落）
+        phone_pattern = re.compile(r"(?:TEL|FAX|AX|電話|傳真)\s*[:：]?\s*[\d\-\+\(\) ]{5,}", re.IGNORECASE)
+        w, h = page.rect.width, page.rect.height
+        for b in page.get_text("dict")["blocks"]:
+            if b["type"] != 0:
+                continue
+            for line in b["lines"]:
+                for span in line["spans"]:
+                    if phone_pattern.search(span["text"]):
+                        x0, y0, x1, y1 = span["bbox"]
+                        # 只遮蔽 title block 區域（頁面左側或下方 25% 範圍）
+                        if x0 < w * 0.25 or y0 > h * 0.75:
+                            page.add_redact_annot(fitz.Rect(span["bbox"]), fill=(1, 1, 1))
         page.apply_redactions()
 
 
