@@ -66,14 +66,34 @@ def apply_text_redaction(doc, company_name: str):
                     if x0 < w * 0.25 or y0 > h * 0.75:
                         all_spans.append(span)
 
+        def text_matches(span_text: str, name: str) -> bool:
+            """Check if span_text is related to name — handles partial/broken text streams."""
+            st, n = span_text.strip(), name.strip()
+            if not st or not n:
+                return False
+            if st in n or n in st:
+                return True
+            # 連續 3 個以上字元重疊
+            min_len = min(len(st), len(n), 4)
+            for i in range(len(n) - min_len + 1):
+                if n[i:i + min_len] in st:
+                    return True
+            return False
+
         # 找到匹配的 span，並擴展遮蔽同一欄位（相同 x 範圍）的所有文字
         matched_x_bands = []  # [(x0, x1, y0, y1)] 已匹配的欄位範圍
         for name in names:
+            # 方法一：search_for（英文/簡單文字效果好）
             rects = page.search_for(name)
             for rect in rects:
                 page.add_redact_annot(rect, fill=(1, 1, 1))
-                # 記錄匹配到的欄位範圍（x 擴展 ±5pt，y 使用原始範圍）
                 matched_x_bands.append((rect.x0 - 5, rect.x1 + 5, rect.y0, rect.y1))
+            # 方法二：span bbox 直接比對（處理 search_for 無法找到的情況）
+            for span in all_spans:
+                if text_matches(span["text"], name):
+                    rect = fitz.Rect(span["bbox"])
+                    page.add_redact_annot(rect, fill=(1, 1, 1))
+                    matched_x_bands.append((rect.x0 - 5, rect.x1 + 5, rect.y0, rect.y1))
 
         # 遮蔽同一欄位內所有其他文字（英文名稱等）：x 和 y 都必須重疊
         for span in all_spans:
