@@ -12,13 +12,11 @@ app = FastAPI()
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://drawshield.vercel.app")
 
-PRICE_CENTS = {"rotate": 300, "redact": 300, "logo": 300, "both": 500, "full": 700}
+PRICE_CENTS = {"rotate": 300, "redact": 500, "full": 700}
 SERVICE_NAMES = {
     "rotate": "PDF 旋轉",
-    "redact": "遮蔽公司名稱",
-    "logo": "遮蔽 LOGO",
-    "both": "旋轉 + 遮蔽公司名稱",
-    "full": "旋轉 + 遮蔽公司名稱 + 遮蔽 LOGO",
+    "redact": "遮蔽公司名稱和 LOGO",
+    "full": "旋轉 + 遮蔽公司名稱和 LOGO",
 }
 
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
@@ -72,14 +70,14 @@ def apply_logo_redaction(doc):
 
 
 def process_doc(doc, service: str, rotate_deg: int, company_name: str):
-    if service in ("rotate", "both", "full"):
+    if service in ("rotate", "full"):
         for page in doc:
             page.set_rotation((page.rotation + rotate_deg) % 360)
 
-    if service in ("redact", "both", "full") and company_name.strip():
+    if service in ("redact", "full") and company_name.strip():
         apply_text_redaction(doc, company_name)
 
-    if service in ("logo", "full"):
+    if service in ("redact", "full"):
         apply_logo_redaction(doc)
 
 
