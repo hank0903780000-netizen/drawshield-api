@@ -38,6 +38,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
+VERSION = "406bf1d-span-fallback"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -523,4 +524,4 @@ async def download(job_id: str):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "DrawShield API"}
+    return {"status": "ok", "service": "DrawShield API", "version": VERSION}
