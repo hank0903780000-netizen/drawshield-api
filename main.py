@@ -1,12 +1,18 @@
-
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 import fitz
 import uuid, os, asyncio
 from pathlib import Path
  
 app = FastAPI()
+ 
+# 允許所有 host
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=["*"]
+)
  
 app.add_middleware(
     CORSMiddleware,
@@ -30,14 +36,6 @@ async def auto_delete(path: str, delay: int = 60):
 def root():
     return {"status": "ok", "service": "DrawShield API"}
  
-@app.options("/{rest_of_path:path}")
-async def preflight(rest_of_path: str):
-    return JSONResponse(content={}, headers={
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-        "Access-Control-Allow-Headers": "*",
-    })
- 
 @app.post("/process")
 async def process_pdf(
     file: UploadFile = File(...),
@@ -59,13 +57,11 @@ async def process_pdf(
     try:
         doc = fitz.open(str(in_path))
  
-        # 旋轉
         if service in ("rotate", "both"):
             for page in doc:
                 current = page.rotation
                 page.set_rotation((current + rotate_deg) % 360)
  
-        # 遮蔽公司名稱
         if service in ("redact", "both") and company_name.strip():
             names = [n.strip() for n in company_name.split(",") if n.strip()]
             for page in doc:
@@ -91,11 +87,7 @@ async def process_pdf(
         asyncio.create_task(auto_delete(str(in_path), 60))
  
     asyncio.create_task(auto_delete(str(out_path), 600))
- 
-    return JSONResponse(
-        content={"download_id": job_id},
-        headers={"Access-Control-Allow-Origin": "*"}
-    )
+    return {"download_id": job_id}
  
  
 @app.get("/download/{job_id}")
@@ -113,5 +105,5 @@ async def download(job_id: str):
         str(path),
         media_type="application/pdf",
         filename="processed.pdf",
-        headers={"Access-Control-Allow-Origin": "*"}
     )
+ 
