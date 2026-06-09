@@ -540,6 +540,29 @@ async def download(job_id: str):
     return FileResponse(str(path), media_type="application/pdf", filename="processed.pdf")
 
 
+@app.post("/debug-spans")
+async def debug_spans(file: UploadFile = File(...)):
+    """Debug: return all title block spans from uploaded PDF."""
+    data = await file.read()
+    doc = fitz.open(stream=data, filetype="pdf")
+    page = doc[0]
+    w, h = page.rect.width, page.rect.height
+    spans = []
+    for b in page.get_text("dict")["blocks"]:
+        if b["type"] == 0:
+            for line in b["lines"]:
+                for span in line["spans"]:
+                    x0,y0,x1,y1 = span["bbox"]
+                    if x0 < w*0.25 and y0 > 550:
+                        spans.append({
+                            "text": span["text"],
+                            "repr": repr(span["text"]),
+                            "codepoints": [hex(ord(c)) for c in span["text"][:6]],
+                            "bbox": [round(v,1) for v in span["bbox"]],
+                        })
+    return {"spans": spans}
+
+
 @app.get("/")
 def root():
     return {"status": "ok", "service": "DrawShield API", "version": VERSION}
