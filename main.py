@@ -12,7 +12,7 @@ app = FastAPI()
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://drawshield.vercel.app")
 
-PRICE_CENTS = {"rotate": 300, "redact": 500, "full": 700}
+PRICE_CENTS = {"rotate": 300, "redact": 300, "full": 500}
 SERVICE_NAMES = {
     "rotate": "PDF 旋轉",
     "redact": "遮蔽公司名稱和 LOGO",
