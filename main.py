@@ -38,7 +38,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "406bf1d-span-fallback"
+VERSION = "ffc4016-surrogate-fix"
 
 
 async def auto_delete(path: str, delay: int = 60):
