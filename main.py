@@ -49,7 +49,8 @@ async def auto_delete(path: str, delay: int = 60):
         pass
 
 
-def apply_text_redaction(doc, company_name: str):
+def apply_text_redaction(doc, company_name: str) -> bool:
+    """Returns True if any redactions were applied (text found and whited out)."""
     import re
     names = [n.strip() for n in company_name.split(",") if n.strip()]
     phone_pattern = re.compile(r"(?:TEL|FAX|AX|電話|傳真)\s*[:：]?\s*[\d\-\+\(\) ]{5,}", re.IGNORECASE)
@@ -124,11 +125,11 @@ def apply_text_redaction(doc, company_name: str):
 
         # 找到匹配的 span，並擴展遮蔽同一欄位（相同 x 範圍）的所有文字
         matched_x_bands = []  # [(x0, x1, y0, y1)] 已匹配的欄位範圍
+        any_redacted = False
         for name in names:
             # 方法一：search_for（英文/簡單文字效果好）
             rects = page.search_for(name)
             for rect in rects:
-                # 找到 search_for 命中的 span，遮蔽整個 span（不只是部分 rect）
                 span_found = False
                 for span in all_spans:
                     if rect_contains_span(rect, span["bbox"]):
@@ -136,9 +137,11 @@ def apply_text_redaction(doc, company_name: str):
                         page.add_redact_annot(full_rect, fill=(1, 1, 1))
                         matched_x_bands.append((full_rect.x0 - 5, full_rect.x1 + 5, full_rect.y0, full_rect.y1))
                         span_found = True
+                        any_redacted = True
                 if not span_found:
                     page.add_redact_annot(rect, fill=(1, 1, 1))
                     matched_x_bands.append((rect.x0 - 5, rect.x1 + 5, rect.y0, rect.y1))
+                    any_redacted = True
             # 方法二：span 文字比對（處理 search_for 完全找不到的情況）
             if not rects:
                 for span in all_spans:
@@ -146,6 +149,7 @@ def apply_text_redaction(doc, company_name: str):
                         full_rect = fitz.Rect(span["bbox"])
                         page.add_redact_annot(full_rect, fill=(1, 1, 1))
                         matched_x_bands.append((full_rect.x0 - 5, full_rect.x1 + 5, full_rect.y0, full_rect.y1))
+                        any_redacted = True
 
         # 遮蔽同一欄位內所有其他文字（英文名稱等）：x 和 y 都必須重疊
         for span in all_spans:
@@ -160,8 +164,11 @@ def apply_text_redaction(doc, company_name: str):
         for span in all_spans:
             if phone_pattern.search(span["text"]):
                 page.add_redact_annot(fitz.Rect(span["bbox"]), fill=(1, 1, 1))
+                any_redacted = True
 
         page.apply_redactions()
+
+    return any_redacted
 
 
 def apply_logo_redaction(doc):
@@ -298,9 +305,8 @@ def redact_scanned_page(doc, page_num: int, company_name: str, do_logo: bool, do
     # ── 公司名稱：自動遮蔽 title block 或 OCR 偵測 ──────────────────────
     if do_text and not company_name.strip():
         # Auto mode: whiteout the entire bottom title block strip
-        # Title block spans the full bottom of most engineering drawings (y > 78%)
-        # Company name/logo can be on left OR right side, so cover full width
-        tb_y0 = int(h * 0.78)
+        # Use 72% threshold to ensure company name near top of title block is covered
+        tb_y0 = int(h * 0.72)
         draw.rectangle([0, tb_y0, w, h], fill="white")
         dirty = True
 
@@ -383,16 +389,25 @@ def process_doc(doc, service: str, rotate_deg: int, company_name: str):
 
     if do_redact:
         # 先處理向量頁面的文字和 LOGO
-        apply_text_redaction(doc, company_name)
+        text_was_redacted = apply_text_redaction(doc, company_name)
         apply_logo_redaction(doc)
 
-        # 再處理掃描頁面（影像層）
         for i in range(len(doc)):
-            if is_scanned_page(doc[i]):
+            page_is_scanned = is_scanned_page(doc[i])
+            if page_is_scanned:
+                # 掃描頁：影像層遮蔽
                 redact_scanned_page(doc, i,
                     company_name=company_name,
                     do_logo=True,
-                    do_text=True  # always True; function handles auto-mode internally
+                    do_text=True
+                )
+            elif not company_name.strip() and not text_was_redacted:
+                # Auto mode，且文字層完全找不到公司名稱
+                # （公司名稱可能以向量路徑繪製）→ 補做影像層 title block 遮蔽
+                redact_scanned_page(doc, i,
+                    company_name="",
+                    do_logo=False,
+                    do_text=True
                 )
 
 
