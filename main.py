@@ -38,7 +38,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "7407366-mediabox-fix"
+VERSION = "ce34435-vector-fallback"
 
 
 async def auto_delete(path: str, delay: int = 60):
