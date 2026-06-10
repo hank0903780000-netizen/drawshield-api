@@ -297,12 +297,11 @@ def redact_scanned_page(doc, page_num: int, company_name: str, do_logo: bool, do
 
     # ── 公司名稱：自動遮蔽 title block 或 OCR 偵測 ──────────────────────
     if do_text and not company_name.strip():
-        # Auto mode: whiteout the title block region directly
-        # The pixmap is rendered in display orientation (landscape for most drawings)
-        # Title block is at bottom-right: x > 52%, y > 78%
-        tb_x0 = int(w * 0.52)
+        # Auto mode: whiteout the entire bottom title block strip
+        # Title block spans the full bottom of most engineering drawings (y > 78%)
+        # Company name/logo can be on left OR right side, so cover full width
         tb_y0 = int(h * 0.78)
-        draw.rectangle([tb_x0, tb_y0, w, h], fill="white")
+        draw.rectangle([0, tb_y0, w, h], fill="white")
         dirty = True
 
     if do_text and company_name.strip() and TESSERACT_OK:
