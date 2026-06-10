@@ -38,7 +38,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "a7744a0-auto-redact"
+VERSION = "7407366-mediabox-fix"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -53,10 +53,20 @@ def apply_text_redaction(doc, company_name: str):
     import re
     names = [n.strip() for n in company_name.split(",") if n.strip()]
     phone_pattern = re.compile(r"(?:TEL|FAX|AX|電話|傳真)\s*[:：]?\s*[\d\-\+\(\) ]{5,}", re.IGNORECASE)
+    # Auto-detect English company name pattern (reliable on Linux despite CJK surrogate issue)
+    english_co_pattern = re.compile(
+        r'\b[A-Z][A-Z\s\.\-]{1,}\s+(?:CORP\.?|INC\.?|LTD\.?|CO\.,?\s*LTD\.?)\b',
+        re.IGNORECASE
+    )
 
     for page in doc:
-        w, h = page.rect.width, page.rect.height
-        # 收集所有 title block 區域的 span（頁面左側 25% 或下方 25%）
+        # Use mediabox (unrotated) dimensions — text coords are always in media space
+        mb = page.mediabox
+        mw, mh = mb.width, mb.height
+        # Title block: narrow edge strips in media space (10% of shorter side or bottom 10%)
+        STRIP = min(mw, mh) * 0.10
+        # Collect title block spans: narrow left/right/top/bottom strip, but skip
+        # spans clearly in the drawing body (e.g. top-half of a narrow left strip)
         all_spans = []
         for b in page.get_text("dict")["blocks"]:
             if b["type"] != 0:
@@ -64,8 +74,15 @@ def apply_text_redaction(doc, company_name: str):
             for line in b["lines"]:
                 for span in line["spans"]:
                     x0, y0, x1, y1 = span["bbox"]
-                    if x0 < w * 0.25 or y0 > h * 0.75:
-                        all_spans.append(span)
+                    in_strip = (x0 < STRIP or x1 > mw - STRIP or
+                                y0 < STRIP or y1 > mh - STRIP)
+                    if not in_strip:
+                        continue
+                    # Skip spans in the upper half of a narrow left/right strip
+                    # (those are NOTE/annotation text, not title block)
+                    if (x0 < STRIP or x1 > mw - STRIP) and y1 < mh * 0.45:
+                        continue
+                    all_spans.append(span)
 
         def clean_str(s: str) -> str:
             """Remove surrogate escapes (Linux PyMuPDF encoding artifact)."""
@@ -96,12 +113,14 @@ def apply_text_redaction(doc, company_name: str):
             y_overlap = rect.y0 <= sy1 and rect.y1 >= sy0
             return x_overlap and y_overlap
 
-        # Auto mode: no company name given → redact ALL text in title block area
+        # Auto mode: no company name → try to detect English company name pattern
+        # (CJK text has surrogate escapes on Linux so English detection is more reliable)
         if not names:
             for span in all_spans:
-                page.add_redact_annot(fitz.Rect(span["bbox"]), fill=(1, 1, 1))
-            page.apply_redactions()
-            continue
+                clean_t = ''.join(c for c in span["text"] if ord(c) < 0xD800 or ord(c) > 0xDFFF).strip()
+                if english_co_pattern.search(clean_t):
+                    names.append(clean_t)
+                    break
 
         # 找到匹配的 span，並擴展遮蔽同一欄位（相同 x 範圍）的所有文字
         matched_x_bands = []  # [(x0, x1, y0, y1)] 已匹配的欄位範圍
@@ -147,7 +166,9 @@ def apply_text_redaction(doc, company_name: str):
 
 def apply_logo_redaction(doc):
     for page in doc:
-        page_area = page.rect.width * page.rect.height
+        # Use mediabox for area/edge calculations (path coords are in media space)
+        mb = page.mediabox
+        page_area = mb.width * mb.height
         redacted = False
 
         # ── 嵌入式點陣圖 ────────────────────────────────────────────────
@@ -217,8 +238,8 @@ def apply_logo_redaction(doc):
             groups.append(group)
 
         # 找面積小且位於頁面邊緣（title block 區）的群集作為 LOGO 候選
-        pw = page.rect.width
-        ph = page.rect.height
+        pw = mb.width   # media box dimensions (same space as path coords)
+        ph = mb.height
         EDGE = 0.18  # 邊緣 18% 範圍視為 title block 區域
         logo_annots = []
         for group in groups:
@@ -274,7 +295,16 @@ def redact_scanned_page(doc, page_num: int, company_name: str, do_logo: bool, do
     w, h = img.size
     dirty = False
 
-    # ── 公司名稱：OCR 偵測 ──────────────────────────────────────────────
+    # ── 公司名稱：自動遮蔽 title block 或 OCR 偵測 ──────────────────────
+    if do_text and not company_name.strip():
+        # Auto mode: whiteout the title block region directly
+        # The pixmap is rendered in display orientation (landscape for most drawings)
+        # Title block is at bottom-right: x > 52%, y > 78%
+        tb_x0 = int(w * 0.52)
+        tb_y0 = int(h * 0.78)
+        draw.rectangle([tb_x0, tb_y0, w, h], fill="white")
+        dirty = True
+
     if do_text and company_name.strip() and TESSERACT_OK:
         names = [n.strip() for n in company_name.split(",") if n.strip()]
         try:
@@ -363,7 +393,7 @@ def process_doc(doc, service: str, rotate_deg: int, company_name: str):
                 redact_scanned_page(doc, i,
                     company_name=company_name,
                     do_logo=True,
-                    do_text=bool(company_name.strip())
+                    do_text=True  # always True; function handles auto-mode internally
                 )
 
 
