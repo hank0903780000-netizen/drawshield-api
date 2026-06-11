@@ -38,7 +38,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "ce34435-vector-fallback"
+VERSION = "cjk-cluster-detect"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -60,6 +60,7 @@ def apply_text_redaction(doc, company_name: str) -> bool:
         re.IGNORECASE
     )
 
+    any_redacted_doc = False
     for page in doc:
         # Use mediabox (unrotated) dimensions — text coords are always in media space
         mb = page.mediabox
@@ -116,16 +117,68 @@ def apply_text_redaction(doc, company_name: str) -> bool:
 
         # Auto mode: no company name → try to detect English company name pattern
         # (CJK text has surrogate escapes on Linux so English detection is more reliable)
+        auto_cluster_rects = []  # CJK 公司名群集（自動模式直接遮蔽的 bbox）
         if not names:
             for span in all_spans:
                 clean_t = ''.join(c for c in span["text"] if ord(c) < 0xD800 or ord(c) > 0xDFFF).strip()
                 if english_co_pattern.search(clean_t):
                     names.append(clean_t)
                     break
+            # CJK 公司名偵測：常見每字一個 span（直排/橫排），
+            # 先把相鄰 span 群組成字串鏈，再比對「有限公司」等字尾。
+            # 掃整頁（公司名欄位不一定在邊緣帶內），字尾比對精確不會誤殺尺寸標注
+            cjk_suffix = re.compile(r"(?:股份)?有限公司|株式会社|实业|實業")
+            spans_left = []
+            for b in page.get_text("dict")["blocks"]:
+                if b["type"] != 0:
+                    continue
+                for line in b["lines"]:
+                    spans_left.extend(line["spans"])
+            clusters = []
+            used = [False] * len(spans_left)
+            GAP = 4  # 相鄰 span 最大間距 (pt)；title block 欄位間距約 7pt，需小於此值
+            for i, s in enumerate(spans_left):
+                if used[i]:
+                    continue
+                chain = [i]
+                used[i] = True
+                grew = True
+                while grew:
+                    grew = False
+                    for j, s2 in enumerate(spans_left):
+                        if used[j]:
+                            continue
+                        b2 = s2["bbox"]
+                        for k in chain:
+                            b1 = spans_left[k]["bbox"]
+                            # x 範圍重疊（同欄直排）且 y 距離小，或 y 重疊（同列橫排）且 x 距離小
+                            x_ov = b1[0] < b2[2] and b1[2] > b2[0]
+                            y_ov = b1[1] < b2[3] and b1[3] > b2[1]
+                            y_gap = max(b1[1], b2[1]) - min(b1[3], b2[3])
+                            x_gap = max(b1[0], b2[0]) - min(b1[2], b2[2])
+                            if (x_ov and y_gap < GAP) or (y_ov and x_gap < GAP):
+                                chain.append(j)
+                                used[j] = True
+                                grew = True
+                                break
+                clusters.append(chain)
+            for chain in clusters:
+                # 依幾何順序串接文字（直排由上而下 / 橫排由左而右皆涵蓋；
+                # 旋轉頁面直排可能 y 遞減，因此兩種順序都試）
+                chs = [spans_left[k] for k in chain]
+                t_fwd = ''.join(clean_str(c["text"]) for c in sorted(chs, key=lambda c: (c["bbox"][1], c["bbox"][0]))).replace(" ", "")
+                t_rev = ''.join(clean_str(c["text"]) for c in sorted(chs, key=lambda c: (-c["bbox"][1], c["bbox"][0]))).replace(" ", "")
+                if cjk_suffix.search(t_fwd) or cjk_suffix.search(t_rev):
+                    xs = [c["bbox"][0] for c in chs] + [c["bbox"][2] for c in chs]
+                    ys = [c["bbox"][1] for c in chs] + [c["bbox"][3] for c in chs]
+                    auto_cluster_rects.append(fitz.Rect(min(xs), min(ys), max(xs), max(ys)))
 
         # 找到匹配的 span，並擴展遮蔽同一欄位（相同 x 範圍）的所有文字
         matched_x_bands = []  # [(x0, x1, y0, y1)] 已匹配的欄位範圍
         any_redacted = False
+        for rect in auto_cluster_rects:
+            page.add_redact_annot(rect, fill=(1, 1, 1))
+            any_redacted = True
         for name in names:
             # 方法一：search_for（英文/簡單文字效果好）
             rects = page.search_for(name)
@@ -167,8 +220,10 @@ def apply_text_redaction(doc, company_name: str) -> bool:
                 any_redacted = True
 
         page.apply_redactions()
+        if any_redacted:
+            any_redacted_doc = True
 
-    return any_redacted
+    return any_redacted_doc
 
 
 def apply_logo_redaction(doc):
