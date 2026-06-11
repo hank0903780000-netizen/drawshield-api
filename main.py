@@ -38,7 +38,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "cjk-cluster-detect"
+VERSION = "watermark-removal"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -62,6 +62,19 @@ def apply_text_redaction(doc, company_name: str) -> bool:
 
     any_redacted_doc = False
     for page in doc:
+        # 浮水印移除：淡灰色文字（不分內容/位置）一律遮蔽。
+        # 工程圖標注為黑/藍/紅深色，淡色大字必為浮水印
+        for b in page.get_text("dict")["blocks"]:
+            if b["type"] != 0:
+                continue
+            for line in b["lines"]:
+                for span in line["spans"]:
+                    col = span.get("color", 0)
+                    r = (col >> 16) & 255
+                    g = (col >> 8) & 255
+                    bl = col & 255
+                    if min(r, g, bl) > 150:  # 淡色（每個色版都偏亮）
+                        page.add_redact_annot(fitz.Rect(span["bbox"]), fill=(1, 1, 1))
         # Use mediabox (unrotated) dimensions — text coords are always in media space
         mb = page.mediabox
         mw, mh = mb.width, mb.height
