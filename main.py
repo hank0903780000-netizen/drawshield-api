@@ -38,7 +38,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "watermark-removal"
+VERSION = "titleblock-line-detect"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -362,20 +362,41 @@ def is_scanned_page(page) -> bool:
 def redact_scanned_page(doc, page_num: int, company_name: str, do_logo: bool, do_text: bool):
     """對掃描頁面做影像層面的遮蔽，再替換回 PDF。"""
     page = doc[page_num]
-    SCALE = 2.0
-    mat = fitz.Matrix(SCALE, SCALE)
-    pix = page.get_pixmap(matrix=mat, alpha=False)
-    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    # 優先取出內嵌原圖（保留原始解析度，避免重新渲染造成模糊）
+    img = None
+    imgs = page.get_images(full=True)
+    if len(imgs) == 1:
+        try:
+            raw = doc.extract_image(imgs[0][0])
+            img = Image.open(io.BytesIO(raw["image"])).convert("RGB")
+        except Exception:
+            img = None
+    if img is None:
+        mat = fitz.Matrix(3.0, 3.0)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     draw = ImageDraw.Draw(img)
     w, h = img.size
     dirty = False
 
     # ── 公司名稱：自動遮蔽 title block 或 OCR 偵測 ──────────────────────
     if do_text and not company_name.strip():
-        # Auto mode: whiteout the entire bottom title block strip
-        # Use 72% threshold to ensure company name near top of title block is covered
-        tb_y0 = int(h * 0.72)
-        draw.rectangle([0, tb_y0, w, h], fill="white")
+        # Auto mode: 偵測標題欄頂線（底部區域橫貫頁寬的黑色長線），
+        # 只塗白該線以下；偵測不到才退回固定底部 20%
+        gray = np.array(img.convert("L"))
+        dark_frac = (gray < 128).mean(axis=1)
+        tb_y0 = None
+        y_lo, y_hi = int(h * 0.60), int(h * 0.97)
+        for y in range(y_lo, y_hi):
+            if dark_frac[y] > 0.55:
+                # 線以下還要有內容（文字列），排除最底部外框線
+                below = gray[y + 2:h]
+                if below.size and (below < 128).mean(axis=1).max() > 0.01 and (h - y) > h * 0.02:
+                    tb_y0 = y
+                    break
+        if tb_y0 is None:
+            tb_y0 = int(h * 0.80)
+        draw.rectangle([0, tb_y0 + 1, w, h], fill="white")
         dirty = True
 
     if do_text and company_name.strip() and TESSERACT_OK:
