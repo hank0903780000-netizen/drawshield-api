@@ -38,7 +38,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "titleblock-line-detect"
+VERSION = "ownership-marks"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -49,6 +49,19 @@ async def auto_delete(path: str, delay: int = 60):
         pass
 
 
+def remove_watermark_artifacts(doc):
+    """移除標準 PDF 浮水印（/Artifact /Watermark 標記內容區塊）。"""
+    import re
+    pat = re.compile(rb"/Artifact\s*<<[^>]*?/Watermark[^>]*?>>\s*BDC.*?EMC\s*", re.DOTALL)
+    for page in doc:
+        for xref in page.get_contents():
+            stream = doc.xref_stream(xref)
+            if stream and b"/Watermark" in stream:
+                new = pat.sub(b"", stream)
+                if new != stream:
+                    doc.update_stream(xref, new)
+
+
 def apply_text_redaction(doc, company_name: str) -> bool:
     """Returns True if any redactions were applied (text found and whited out)."""
     import re
@@ -56,7 +69,12 @@ def apply_text_redaction(doc, company_name: str) -> bool:
     phone_pattern = re.compile(r"(?:TEL|FAX|AX|電話|傳真)\s*[:：]?\s*[\d\-\+\(\) ]{5,}", re.IGNORECASE)
     # Auto-detect English company name pattern (reliable on Linux despite CJK surrogate issue)
     english_co_pattern = re.compile(
-        r'\b[A-Z][A-Z\s\.\-]{1,}\s+(?:CORP\.?|INC\.?|LTD\.?|CO\.,?\s*LTD\.?)\b',
+        r'\b[A-Z][A-Z\s\.\-]{1,}\s+(?:CORP(?:ORATION)?\.?|INC\.?|LTD\.?|LIMITED|COMPANY|GMBH|CO\.,?\s*LTD\.?)\b',
+        re.IGNORECASE
+    )
+    # 所有權/機密聲明（整個 span 直接遮蔽，不限位置）
+    ownership_pattern = re.compile(
+        r'智慧財產|機密文件|集團所有|公司所有|CONFIDENTIAL|PROPRIETARY|ALL RIGHTS RESERVED',
         re.IGNORECASE
     )
 
@@ -73,8 +91,29 @@ def apply_text_redaction(doc, company_name: str) -> bool:
                     r = (col >> 16) & 255
                     g = (col >> 8) & 255
                     bl = col & 255
-                    if min(r, g, bl) > 150:  # 淡色（每個色版都偏亮）
+                    clean_sp = ''.join(c for c in span["text"] if ord(c) < 0xD800 or ord(c) > 0xDFFF)
+                    if (min(r, g, bl) > 150 or ownership_pattern.search(clean_sp)
+                            or clean_sp.strip() in ("密", "機密", "极密", "極密")):
                         page.add_redact_annot(fitz.Rect(span["bbox"]), fill=(1, 1, 1))
+        # 「機 密」拆成兩個相鄰 span 的戳記：機+密 距離近時一併遮蔽
+        mi_spans, ji_spans = [], []
+        for b in page.get_text("dict")["blocks"]:
+            if b["type"] != 0:
+                continue
+            for line in b["lines"]:
+                for span in line["spans"]:
+                    t = ''.join(c for c in span["text"] if ord(c) < 0xD800 or ord(c) > 0xDFFF).strip()
+                    if t == "機":
+                        ji_spans.append(span["bbox"])
+                    elif t == "密":
+                        mi_spans.append(span["bbox"])
+        for jb in ji_spans:
+            for mb_ in mi_spans:
+                dx = max(jb[0], mb_[0]) - min(jb[2], mb_[2])
+                dy = max(jb[1], mb_[1]) - min(jb[3], mb_[3])
+                if dx < 30 and dy < 30:
+                    page.add_redact_annot(fitz.Rect(jb), fill=(1, 1, 1))
+                    page.add_redact_annot(fitz.Rect(mb_), fill=(1, 1, 1))
         # Use mediabox (unrotated) dimensions — text coords are always in media space
         mb = page.mediabox
         mw, mh = mb.width, mb.height
@@ -477,6 +516,7 @@ def process_doc(doc, service: str, rotate_deg: int, company_name: str):
             page.set_rotation((page.rotation + rotate_deg) % 360)
 
     if do_redact:
+        remove_watermark_artifacts(doc)
         # 先處理向量頁面的文字和 LOGO
         text_was_redacted = apply_text_redaction(doc, company_name)
         apply_logo_redaction(doc)
