@@ -38,7 +38,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "ownership-marks"
+VERSION = "ocr-precise-redact"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -82,7 +82,9 @@ def apply_text_redaction(doc, company_name: str) -> bool:
     for page in doc:
         # 浮水印移除：淡灰色文字（不分內容/位置）一律遮蔽。
         # 工程圖標注為黑/藍/紅深色，淡色大字必為浮水印
-        for b in page.get_text("dict")["blocks"]:
+        # 用 rawdict 取得逐字元框：斜放浮水印的 span bbox 是巨大方框，
+        # 整框塗白會蓋掉圖面；改為逐字元刪除字形且不塗色（fill=False）
+        for b in page.get_text("rawdict")["blocks"]:
             if b["type"] != 0:
                 continue
             for line in b["lines"]:
@@ -91,10 +93,14 @@ def apply_text_redaction(doc, company_name: str) -> bool:
                     r = (col >> 16) & 255
                     g = (col >> 8) & 255
                     bl = col & 255
-                    clean_sp = ''.join(c for c in span["text"] if ord(c) < 0xD800 or ord(c) > 0xDFFF)
+                    clean_sp = ''.join(
+                        ch["c"] for ch in span["chars"]
+                        if ord(ch["c"]) < 0xD800 or ord(ch["c"]) > 0xDFFF
+                    )
                     if (min(r, g, bl) > 150 or ownership_pattern.search(clean_sp)
                             or clean_sp.strip() in ("密", "機密", "极密", "極密")):
-                        page.add_redact_annot(fitz.Rect(span["bbox"]), fill=(1, 1, 1))
+                        for ch in span["chars"]:
+                            page.add_redact_annot(fitz.Rect(ch["bbox"]), fill=False)
         # 「機 密」拆成兩個相鄰 span 的戳記：機+密 距離近時一併遮蔽
         mi_spans, ji_spans = [], []
         for b in page.get_text("dict")["blocks"]:
@@ -398,6 +404,243 @@ def is_scanned_page(page) -> bool:
     return False
 
 
+SENSITIVE_LINE = None  # lazy-compiled
+
+def _sensitive_pattern():
+    global SENSITIVE_LINE
+    if SENSITIVE_LINE is None:
+        import re
+        SENSITIVE_LINE = re.compile(
+            r"公司|集團|集团|企業社|株式会社|实业|實業|"
+            r"CO\W{0,2}LTD|CORP|INC\b|LIMITED|GMBH|"
+            r"TEL|FAX|電話|傳真|电话|传真|"
+            r"機密|机密|CONFIDENTIAL|PROPRIETARY",
+            re.IGNORECASE,
+        )
+    return SENSITIVE_LINE
+
+
+COMPANY_LINE = None
+
+def _company_pattern():
+    global COMPANY_LINE
+    if COMPANY_LINE is None:
+        import re
+        COMPANY_LINE = re.compile(
+            r"公司|集團|集团|企業社|株式会社|实业|實業|"
+            r"CO\W{0,2}LTD|CORP|INC\b|LIMITED|GMBH",
+            re.IGNORECASE,
+        )
+    return COMPANY_LINE
+
+
+def _expand_to_cell(gray, box):
+    """把像素框沿表格黑色格線擴張到整個儲存格（找不到格線則维持原框）。"""
+    h, w = gray.shape
+    x0, y0, x1, y1 = [int(v) for v in box]
+    x0, y0 = max(x0, 0), max(y0, 0)
+    x1, y1 = min(x1, w - 1), min(y1, h - 1)
+    LIM_X, LIM_Y = int(w * 0.30), int(h * 0.08)
+    bh = max(y1 - y0, 8)
+    # 直格線需貫穿超出文字行高的範圍（字的筆畫只在行內，不會誤判）
+    vy0, vy1 = max(0, y0 - bh), min(h - 1, y1 + bh)
+    def v_line(x):
+        col = gray[vy0:vy1, x]
+        return col.size and (col < 160).mean() > 0.45
+    def h_line(y):
+        row = gray[y, x0:x1]
+        return row.size and (row < 160).mean() > 0.45
+    # 真格線判別：細線(≤5px) 且其後 18px 內全白（格線旁是儲存格留白）；
+    # LOGO/文字筆畫後方近距離內還有黑色內容 → 視為內容穿過並納入遮蔽
+    def col_has_ink(x):
+        col = gray[vy0:vy1, x]
+        return col.size and (col < 160).mean() > 0.15
+    def run_width(x, step):
+        n = 0
+        while 0 <= x < w and v_line(x) and n < 60:
+            n += 1
+            x += step
+        return n
+    def is_border(x, rw, step):
+        if rw > 12:
+            return False
+        probe0 = x + step * rw
+        for k in range(1, 19):
+            xx = probe0 + step * k
+            if 0 <= xx < w and col_has_ink(xx):
+                return False
+        return True
+    def scan(x_start, step, lim):
+        x = x_start
+        while (x > lim) if step < 0 else (x < lim):
+            if v_line(x):
+                rw = run_width(x, step)
+                if is_border(x, rw, step):
+                    return x - step  # 停在格線內側
+                x += step * max(rw, 1)
+            else:
+                x += step
+        return None
+    res = scan(x0, -1, max(0, x0 - LIM_X))
+    nx0 = res if res is not None else x0
+    res = scan(x1, 1, min(w - 1, x1 + LIM_X))
+    nx1 = res if res is not None else x1
+    ny0 = y0
+    for y in range(y0, max(0, y0 - LIM_Y) - 1, -1):
+        if h_line(y):
+            ny0 = y + 1
+            break
+    ny1 = y1
+    for y in range(y1, min(h - 1, y1 + LIM_Y) + 1):
+        if h_line(y):
+            ny1 = y - 1
+            break
+    return (nx0, ny0, nx1, ny1)
+
+
+def ocr_sensitive_boxes(img, expand=True):
+    """整頁 + 底部標題欄區各 OCR 一次（局部 OCR 對標題欄小字辨識率較高），
+    合併敏感行框。"""
+    boxes = _ocr_sensitive_boxes_single(img, expand)
+    if boxes is None:
+        return None
+    w, h = img.size
+    y_off = int(h * 0.70)
+    crop = img.crop((0, y_off, w, h))
+    for psm in (11, 6):  # 稀疏 + 整齊版面兩種模式，提高標題欄辨識率
+        extra = _ocr_sensitive_boxes_single(crop, expand, psm=psm) or []
+        for (x0, y0, x1, y1) in extra:
+            boxes.append((x0, y0 + y_off, x1, y1 + y_off))
+    # 合併重疊框
+    merged = []
+    for bx in boxes:
+        for i, mb_ in enumerate(merged):
+            if bx[0] < mb_[2] and bx[2] > mb_[0] and bx[1] < mb_[3] and bx[3] > mb_[1]:
+                merged[i] = (min(bx[0], mb_[0]), min(bx[1], mb_[1]),
+                             max(bx[2], mb_[2]), max(bx[3], mb_[3]))
+                break
+        else:
+            merged.append(bx)
+    return merged
+
+
+def _ocr_sensitive_boxes_single(img, expand=True, psm=11):
+    """OCR 影像，回傳含公司名/電話/機密字樣之「行」的像素框 [(x0,y0,x1,y1)]。
+    expand=True 時公司名行沿表格格線擴張至整個儲存格。"""
+    if not TESSERACT_OK:
+        return None  # OCR 不可用
+    try:
+        data = pytesseract.image_to_data(
+            img, lang="chi_tra+eng",
+            output_type=pytesseract.Output.DICT,
+            config=f"--psm {psm}",
+        )
+    except Exception:
+        return None
+    pat = _sensitive_pattern()
+    co_pat = _company_pattern()
+    gray = np.array(img.convert("L"))
+    # 依 (block, par, line) 分行
+    lines = {}
+    for i, token in enumerate(data["text"]):
+        if not token.strip() or int(data["conf"][i]) < 10:
+            continue
+        key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        lines.setdefault(key, []).append(i)
+    boxes = []
+    for key, idxs in lines.items():
+        joined = "".join(data["text"][i] for i in idxs)
+        if pat.search(joined):
+            x0 = min(data["left"][i] for i in idxs)
+            y0 = min(data["top"][i] for i in idxs)
+            x1 = max(data["left"][i] + data["width"][i] for i in idxs)
+            y1 = max(data["top"][i] + data["height"][i] for i in idxs)
+            img_w = img.size[0]
+            if (x1 - x0) > img_w * 0.5:
+                # OCR 把整列當一行（常見於 psm 6）：只取個別命中的 token
+                for i in idxs:
+                    tk = data["text"][i]
+                    if pat.search(tk):
+                        bx = (data["left"][i] - 4, data["top"][i] - 4,
+                              data["left"][i] + data["width"][i] + 4,
+                              data["top"][i] + data["height"][i] + 4)
+                        if expand and co_pat.search(tk):
+                            bx = _expand_to_cell(gray, bx)
+                        boxes.append(bx)
+                continue
+            box = (x0 - 4, y0 - 4, x1 + 4, y1 + 4)
+            if expand and co_pat.search(joined):
+                box = _expand_to_cell(gray, box)
+            boxes.append(box)
+    return boxes
+
+
+def redact_vector_page_ocr(page) -> bool:
+    """向量頁找不到文字層公司名時：渲染→OCR→只在敏感行位置畫白色方塊。
+    保持頁面向量內容，畫質不變。回傳是否有遮蔽。"""
+    SCALE = 2.0
+    pix = page.get_pixmap(matrix=fitz.Matrix(SCALE, SCALE), alpha=False)
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    boxes = ocr_sensitive_boxes(img, expand=True)
+    if boxes is None:
+        return False
+    # 追加：標題欄區域的實心黑塊（LOGO 密度遠高於文字/格線）
+    boxes = list(boxes) + dense_logo_boxes(img)
+    if not boxes:
+        return False
+    # pixmap 座標(已含旋轉) → 還原至頁面座標系
+    inv = ~page.rotation_matrix
+    for (x0, y0, x1, y1) in boxes:
+        r = fitz.Rect(x0 / SCALE, y0 / SCALE, x1 / SCALE, y1 / SCALE) * inv
+        r.normalize()
+        page.draw_rect(r, color=None, fill=(1, 1, 1), overlay=True)
+    return True
+
+
+def dense_logo_boxes(img):
+    """在標題欄區域（底部 18%）找實心黑色區塊（LOGO）。
+    以 24px 視窗密度 > 0.5 判定，相鄰視窗合併為框。"""
+    gray = np.array(img.convert("L"))
+    h, w = gray.shape
+    y0 = int(h * 0.82)
+    region = (gray[y0:h] < 100).astype(np.float32)
+    WIN = 24
+    rh, rw = region.shape
+    if rh < WIN or rw < WIN:
+        return []
+    # 區塊平均（非重疊網格即可）
+    gh, gw = rh // WIN, rw // WIN
+    block = region[:gh * WIN, :gw * WIN].reshape(gh, WIN, gw, WIN).mean(axis=(1, 3))
+    hits = np.argwhere(block > 0.4)
+    if len(hits) == 0:
+        return []
+    # 合併相鄰網格
+    boxes = []
+    used = set()
+    hitset = {(int(a), int(b)) for a, b in hits}
+    for cell in hitset:
+        if cell in used:
+            continue
+        stack = [cell]
+        used.add(cell)
+        comp = []
+        while stack:
+            cy, cx = stack.pop()
+            comp.append((cy, cx))
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    nb = (cy + dy, cx + dx)
+                    if nb in hitset and nb not in used:
+                        used.add(nb)
+                        stack.append(nb)
+        ys = [c[0] for c in comp]; xs = [c[1] for c in comp]
+        boxes.append((
+            min(xs) * WIN - 6, y0 + min(ys) * WIN - 6,
+            (max(xs) + 1) * WIN + 6, y0 + (max(ys) + 1) * WIN + 6,
+        ))
+    return boxes
+
+
 def redact_scanned_page(doc, page_num: int, company_name: str, do_logo: bool, do_text: bool):
     """對掃描頁面做影像層面的遮蔽，再替換回 PDF。"""
     page = doc[page_num]
@@ -420,23 +663,29 @@ def redact_scanned_page(doc, page_num: int, company_name: str, do_logo: bool, do
 
     # ── 公司名稱：自動遮蔽 title block 或 OCR 偵測 ──────────────────────
     if do_text and not company_name.strip():
-        # Auto mode: 偵測標題欄頂線（底部區域橫貫頁寬的黑色長線），
-        # 只塗白該線以下；偵測不到才退回固定底部 20%
-        gray = np.array(img.convert("L"))
-        dark_frac = (gray < 128).mean(axis=1)
-        tb_y0 = None
-        y_lo, y_hi = int(h * 0.60), int(h * 0.97)
-        for y in range(y_lo, y_hi):
-            if dark_frac[y] > 0.55:
-                # 線以下還要有內容（文字列），排除最底部外框線
-                below = gray[y + 2:h]
-                if below.size and (below < 128).mean(axis=1).max() > 0.01 and (h - y) > h * 0.02:
-                    tb_y0 = y
-                    break
-        if tb_y0 is None:
-            tb_y0 = int(h * 0.80)
-        draw.rectangle([0, tb_y0 + 1, w, h], fill="white")
-        dirty = True
+        # Auto mode: 先試 OCR 精準遮蔽敏感行（公司名/TEL/FAX/機密）；
+        # OCR 不可用或無結果才退回標題欄頂線偵測（塗白整條）
+        boxes = ocr_sensitive_boxes(img)
+        if boxes:
+            for (bx0, by0, bx1, by1) in boxes:
+                draw.rectangle([bx0, by0, bx1, by1], fill="white")
+            dirty = True
+        else:
+            gray = np.array(img.convert("L"))
+            dark_frac = (gray < 128).mean(axis=1)
+            tb_y0 = None
+            y_lo, y_hi = int(h * 0.60), int(h * 0.97)
+            for y in range(y_lo, y_hi):
+                if dark_frac[y] > 0.55:
+                    # 線以下還要有內容（文字列），排除最底部外框線
+                    below = gray[y + 2:h]
+                    if below.size and (below < 128).mean(axis=1).max() > 0.01 and (h - y) > h * 0.02:
+                        tb_y0 = y
+                        break
+            if tb_y0 is None:
+                tb_y0 = int(h * 0.80)
+            draw.rectangle([0, tb_y0 + 1, w, h], fill="white")
+            dirty = True
 
     if do_text and company_name.strip() and TESSERACT_OK:
         names = [n.strip() for n in company_name.split(",") if n.strip()]
@@ -532,12 +781,14 @@ def process_doc(doc, service: str, rotate_deg: int, company_name: str):
                 )
             elif not company_name.strip() and not text_was_redacted:
                 # Auto mode，且文字層完全找不到公司名稱
-                # （公司名稱可能以向量路徑繪製）→ 補做影像層 title block 遮蔽
-                redact_scanned_page(doc, i,
-                    company_name="",
-                    do_logo=False,
-                    do_text=True
-                )
+                # （公司名稱可能以向量路徑繪製）→ OCR 精準遮蔽，保持向量畫質。
+                # OCR 不可用時才退回影像層 title block 整條遮蔽
+                if not redact_vector_page_ocr(doc[i]) and not TESSERACT_OK:
+                    redact_scanned_page(doc, i,
+                        company_name="",
+                        do_logo=False,
+                        do_text=True
+                    )
 
 
 # ── Upload (pre-payment file staging) ───────────────────────────────────────
