@@ -38,7 +38,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "ocr-precise-redact"
+VERSION = "ocr-scale3"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -578,7 +578,7 @@ def _ocr_sensitive_boxes_single(img, expand=True, psm=11):
 def redact_vector_page_ocr(page) -> bool:
     """向量頁找不到文字層公司名時：渲染→OCR→只在敏感行位置畫白色方塊。
     保持頁面向量內容，畫質不變。回傳是否有遮蔽。"""
-    SCALE = 2.0
+    SCALE = 3.0
     pix = page.get_pixmap(matrix=fitz.Matrix(SCALE, SCALE), alpha=False)
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     boxes = ocr_sensitive_boxes(img, expand=True)
