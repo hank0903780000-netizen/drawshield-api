@@ -60,7 +60,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "true-redaction"
+VERSION = "tight-company-box"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -548,6 +548,66 @@ def _expand_to_cell(gray, box):
     return (nx0, ny0, nx1, ny1)
 
 
+def _tight_company_box(gray, box):
+    """緊貼公司名區塊（商標+中文名+英文名）：從英文名框沿四向長大，
+    遇到「整段空白」即停，不撐到格線、不吃鄰格。"""
+    h, w = gray.shape
+    x0, y0, x1, y1 = [int(v) for v in box]
+    x0 = max(x0, 0); y0 = max(y0, 0); x1 = min(x1, w - 1); y1 = min(y1, h - 1)
+    bh = max(y1 - y0, 8)
+    GAP = max(int(bh * 0.9), 6)   # 視為「區塊邊界」的連續空白量
+    LIM = int(bh * 4)             # 各方向最大延伸
+    DARK = 140
+
+    def col_has_ink(x, ylo, yhi):
+        c = gray[max(0, ylo):min(h, yhi), x]
+        return c.size and int((c < DARK).sum()) >= 2
+
+    def row_has_ink(y, xlo, xhi):
+        r = gray[y, max(0, xlo):min(w, xhi)]
+        return r.size and int((r < DARK).sum()) >= 2
+
+    # 先上下長大（涵蓋英文名上方的中文名），用目前寬度判斷
+    ny0 = y0
+    gap = 0
+    for y in range(y0 - 1, max(0, y0 - LIM) - 1, -1):
+        if row_has_ink(y, x0, x1):
+            ny0 = y; gap = 0
+        else:
+            gap += 1
+            if gap >= GAP:
+                break
+    ny1 = y1
+    gap = 0
+    for y in range(y1 + 1, min(h - 1, y1 + LIM) + 1):
+        if row_has_ink(y, x0, x1):
+            ny1 = y; gap = 0
+        else:
+            gap += 1
+            if gap >= GAP:
+                break
+    # 再左右長大（涵蓋商標），用已長好的高度判斷
+    nx0 = x0
+    gap = 0
+    for x in range(x0 - 1, max(0, x0 - LIM) - 1, -1):
+        if col_has_ink(x, ny0, ny1):
+            nx0 = x; gap = 0
+        else:
+            gap += 1
+            if gap >= GAP:
+                break
+    nx1 = x1
+    gap = 0
+    for x in range(x1 + 1, min(w - 1, x1 + LIM) + 1):
+        if col_has_ink(x, ny0, ny1):
+            nx1 = x; gap = 0
+        else:
+            gap += 1
+            if gap >= GAP:
+                break
+    return (nx0 - 2, ny0 - 2, nx1 + 2, ny1 + 2)
+
+
 def ocr_sensitive_boxes(img, expand=True):
     """整頁 + 底部標題欄區各 OCR 一次（局部 OCR 對標題欄小字辨識率較高），
     合併敏感行框。"""
@@ -615,12 +675,12 @@ def _ocr_sensitive_boxes_single(img, expand=True, psm=11):
                               data["left"][i] + data["width"][i] + 4,
                               data["top"][i] + data["height"][i] + 4)
                         if expand and co_pat.search(tk):
-                            bx = _expand_to_cell(gray, bx)
+                            bx = _tight_company_box(gray, bx)
                         boxes.append(bx)
                 continue
             box = (x0 - 4, y0 - 4, x1 + 4, y1 + 4)
             if expand and co_pat.search(joined):
-                box = _expand_to_cell(gray, box)
+                box = _tight_company_box(gray, box)
             boxes.append(box)
     return boxes
 
