@@ -60,7 +60,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "ecpay-payment"
+VERSION = "cell-border-runs"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -519,16 +519,32 @@ def _expand_to_cell(gray, box):
     nx0 = res if res is not None else x0
     res = scan(x1, 1, min(w - 1, x1 + LIM_X))
     nx1 = res if res is not None else x1
+
+    # 上下邊框：用「最長連續暗點」橫貫整格寬度判別（真邊框連續，文字有斷點）
+    def longest_dark_run(arr_row):
+        best = run = 0
+        for v in arr_row:
+            if v < 160:
+                run += 1
+                if run > best:
+                    best = run
+            else:
+                run = 0
+        return best
+    span = max(nx1 - nx0, 1)
+    need = span * 0.6  # 連續暗點需達整格寬 60% 才算邊框
     ny0 = y0
     for y in range(y0, max(0, y0 - LIM_Y) - 1, -1):
-        if h_line(y):
+        if longest_dark_run(gray[y, nx0:nx1]) >= need:
             ny0 = y + 1
             break
+        ny0 = y
     ny1 = y1
     for y in range(y1, min(h - 1, y1 + LIM_Y) + 1):
-        if h_line(y):
+        if longest_dark_run(gray[y, nx0:nx1]) >= need:
             ny1 = y - 1
             break
+        ny1 = y
     return (nx0, ny0, nx1, ny1)
 
 
