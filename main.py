@@ -1,7 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 import fitz
 import stripe
 import uuid, os, asyncio, io
@@ -21,11 +21,33 @@ stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://drawshield.vercel.app")
 
 PRICE_CENTS = {"rotate": 300, "redact": 300, "full": 500}
+# 綠界 ECPay 為新台幣計價（信用卡）
+PRICE_TWD = {"rotate": 100, "redact": 100, "full": 150}
 SERVICE_NAMES = {
     "rotate": "PDF 旋轉",
     "redact": "遮蔽公司名稱和 LOGO",
     "full": "旋轉 + 遮蔽公司名稱和 LOGO",
 }
+
+# ── 綠界 ECPay 全方位金流設定 ─────────────────────────────────────────────
+# 預設為綠界官方「測試環境」公開測試帳號，正式上線時於 Railway 設定環境變數覆蓋
+ECPAY_MERCHANT_ID = os.environ.get("ECPAY_MERCHANT_ID", "2000132")
+ECPAY_HASH_KEY = os.environ.get("ECPAY_HASH_KEY", "5294y06JbISpM5x9")
+ECPAY_HASH_IV = os.environ.get("ECPAY_HASH_IV", "v77hoKGq4kWxNNIS")
+ECPAY_ENV = os.environ.get("ECPAY_ENV", "stage")  # "stage" 或 "production"
+ECPAY_AIO_URL = (
+    "https://payment.ecpay.com.tw/Cgi-Bin/AioCheckOut/V5"
+    if ECPAY_ENV == "production"
+    else "https://payment-stage.ecpay.com.tw/Cgi-Bin/AioCheckOut/V5"
+)
+# 後端公開網址（綠界 server-to-server 回呼 ReturnURL 用）
+API_PUBLIC_URL = os.environ.get(
+    "API_PUBLIC_URL",
+    "https://enchanting-integrity-production-36f6.up.railway.app",
+)
+
+# 訂單暫存（單機記憶體即可；檔案 30 分鐘後自動刪，重啟遺失可接受）
+ECPAY_ORDERS = {}  # MerchantTradeNo -> {upload_ids, service, rotate_deg, company_name, paid, results}
 
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
 app.add_middleware(
@@ -38,7 +60,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "broaden-detect"
+VERSION = "ecpay-payment"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -882,6 +904,132 @@ async def create_checkout(request: Request):
     )
 
     return {"checkout_url": session.url}
+
+
+# ── 綠界 ECPay 工具函式 ───────────────────────────────────────────────────
+
+def _ecpay_check_mac(params: dict) -> str:
+    """依綠界 AIO V5 規格計算 CheckMacValue（SHA256, 大寫）。"""
+    import hashlib
+    from urllib.parse import quote_plus
+    items = sorted((k, v) for k, v in params.items() if k != "CheckMacValue")
+    raw = f"HashKey={ECPAY_HASH_KEY}&" + \
+          "&".join(f"{k}={v}" for k, v in items) + \
+          f"&HashIV={ECPAY_HASH_IV}"
+    encoded = quote_plus(raw).lower()
+    # .NET UrlEncode 相容字元還原
+    for a, b in (("%2d", "-"), ("%5f", "_"), ("%2e", "."), ("%21", "!"),
+                 ("%2a", "*"), ("%28", "("), ("%29", ")")):
+        encoded = encoded.replace(a, b)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest().upper()
+
+
+async def _process_uploads(upload_ids, service, rotate_deg, company_name):
+    """共用處理流程：對暫存檔做去識別，回傳 [{upload_id, download_id}]。"""
+    results = []
+    for upload_id in upload_ids:
+        try:
+            uuid.UUID(upload_id)
+        except ValueError:
+            raise HTTPException(400, f"無效的 upload_id：{upload_id}")
+        stage_path = UPLOAD_DIR / f"{upload_id}_stage.pdf"
+        if not stage_path.exists():
+            raise HTTPException(404, f"暫存檔案已過期，請重新上傳：{upload_id}")
+        job_id = str(uuid.uuid4())
+        out_path = UPLOAD_DIR / f"{job_id}_out.pdf"
+        try:
+            doc = fitz.open(str(stage_path))
+            process_doc(doc, service, rotate_deg, company_name)
+            doc.save(str(out_path))
+            doc.close()
+        except Exception as e:
+            raise HTTPException(500, f"處理失敗：{str(e)}")
+        finally:
+            asyncio.create_task(auto_delete(str(stage_path), 5))
+        asyncio.create_task(auto_delete(str(out_path), 600))
+        results.append({"upload_id": upload_id, "download_id": job_id})
+    return results
+
+
+# ── 綠界 ECPay 結帳 ───────────────────────────────────────────────────────
+
+@app.post("/create-ecpay-order")
+async def create_ecpay_order(request: Request):
+    """建立綠界訂單，回傳自動送出表單所需的 action 與參數。"""
+    import time
+    body = await request.json()
+    upload_ids = body.get("upload_ids", [])
+    service = body.get("service", "rotate")
+    rotate_deg = int(body.get("rotate_deg", 90))
+    company_name = body.get("company_name", "")
+    if not upload_ids:
+        raise HTTPException(400, "未提供檔案")
+
+    unit = PRICE_TWD.get(service, 100)
+    total = unit * len(upload_ids)
+    # MerchantTradeNo：英數，≤20 碼
+    trade_no = "DS" + uuid.uuid4().hex[:16].upper()
+    ECPAY_ORDERS[trade_no] = {
+        "upload_ids": upload_ids, "service": service,
+        "rotate_deg": rotate_deg, "company_name": company_name,
+        "paid": False, "results": None,
+    }
+    asyncio.create_task(_expire_order(trade_no, 1800))
+
+    svc = SERVICE_NAMES.get(service, service)
+    params = {
+        "MerchantID": ECPAY_MERCHANT_ID,
+        "MerchantTradeNo": trade_no,
+        "MerchantTradeDate": time.strftime("%Y/%m/%d %H:%M:%S"),
+        "PaymentType": "aio",
+        "TotalAmount": str(total),
+        "TradeDesc": "DrawShield 圖面去識別服務",
+        "ItemName": f"DrawShield {svc} x{len(upload_ids)}",
+        "ReturnURL": f"{API_PUBLIC_URL}/ecpay-return",
+        "ClientBackURL": f"{FRONTEND_URL}/?ecpay_order={trade_no}",
+        "ChoosePayment": "Credit",
+        "EncryptType": "1",
+    }
+    params["CheckMacValue"] = _ecpay_check_mac(params)
+    return {"action": ECPAY_AIO_URL, "params": params, "order": trade_no}
+
+
+@app.post("/ecpay-return")
+async def ecpay_return(request: Request):
+    """綠界 server-to-server 付款結果回呼。驗章後標記訂單已付款。"""
+    form = await request.form()
+    data = {k: v for k, v in form.items()}
+    mac = data.get("CheckMacValue", "")
+    if _ecpay_check_mac(data) != mac:
+        return PlainTextResponse("0|CheckMacValue Error")
+    trade_no = data.get("MerchantTradeNo", "")
+    order = ECPAY_ORDERS.get(trade_no)
+    if order is None:
+        return PlainTextResponse("0|Order Not Found")
+    if data.get("RtnCode") == "1":  # 付款成功
+        if not order["paid"]:
+            order["paid"] = True
+            try:
+                order["results"] = await _process_uploads(
+                    order["upload_ids"], order["service"],
+                    order["rotate_deg"], order["company_name"],
+                )
+            except Exception:
+                order["results"] = []
+    return PlainTextResponse("1|OK")
+
+
+@app.get("/ecpay-order-status/{trade_no}")
+async def ecpay_order_status(trade_no: str):
+    order = ECPAY_ORDERS.get(trade_no)
+    if order is None:
+        raise HTTPException(404, "訂單不存在或已過期")
+    return {"paid": order["paid"], "results": order["results"] or []}
+
+
+async def _expire_order(trade_no: str, delay: int):
+    await asyncio.sleep(delay)
+    ECPAY_ORDERS.pop(trade_no, None)
 
 
 # ── Process after payment ────────────────────────────────────────────────────
