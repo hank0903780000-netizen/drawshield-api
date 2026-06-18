@@ -38,7 +38,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "ocr-scale3"
+VERSION = "broaden-detect"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -77,6 +77,11 @@ def apply_text_redaction(doc, company_name: str) -> bool:
         r'智慧財產|機密文件|集團所有|公司所有|CONFIDENTIAL|PROPRIETARY|ALL RIGHTS RESERVED',
         re.IGNORECASE
     )
+    # 全頁掃描用：縮寫電話（T:/F: 接號碼）與完整英文公司名（含 ENGINEERING 等）
+    phone_abbr_pattern = re.compile(
+        r'(?:TEL|FAX|電話|傳真|电话|传真|\bT|\bF)\s*[:：]\s*[\d\-\+\(\)]{5,}',
+        re.IGNORECASE
+    )
 
     any_redacted_doc = False
     for page in doc:
@@ -101,6 +106,10 @@ def apply_text_redaction(doc, company_name: str) -> bool:
                             or clean_sp.strip() in ("密", "機密", "极密", "極密")):
                         for ch in span["chars"]:
                             page.add_redact_annot(fitz.Rect(ch["bbox"]), fill=False)
+                    # 全頁掃描縮寫電話 / 完整英文公司名（不限窄帶，整 span 塗白）
+                    elif (phone_abbr_pattern.search(clean_sp)
+                            or english_co_pattern.search(clean_sp)):
+                        page.add_redact_annot(fitz.Rect(span["bbox"]), fill=(1, 1, 1))
         # 「機 密」拆成兩個相鄰 span 的戳記：機+密 距離近時一併遮蔽
         mi_spans, ji_spans = [], []
         for b in page.get_text("dict")["blocks"]:
@@ -412,8 +421,10 @@ def _sensitive_pattern():
         import re
         SENSITIVE_LINE = re.compile(
             r"公司|集團|集团|企業社|株式会社|实业|實業|"
-            r"CO\W{0,2}LTD|CORP|INC\b|LIMITED|GMBH|"
+            r"CO\W{0,2}LTD|CORP|INC\b|\bLTD\b|LIMITED|GMBH|"
+            r"ENGINEERING|INDUSTR|TECHNOLOG|ENTERPRISE|"
             r"TEL|FAX|電話|傳真|电话|传真|"
+            r"\bT\s*[:：]\s*\d|\bF\s*[:：]\s*\d|"  # T:/F: 縮寫後接數字
             r"機密|机密|CONFIDENTIAL|PROPRIETARY",
             re.IGNORECASE,
         )
@@ -428,7 +439,8 @@ def _company_pattern():
         import re
         COMPANY_LINE = re.compile(
             r"公司|集團|集团|企業社|株式会社|实业|實業|"
-            r"CO\W{0,2}LTD|CORP|INC\b|LIMITED|GMBH",
+            r"CO\W{0,2}LTD|CORP|INC\b|\bLTD\b|LIMITED|GMBH|"
+            r"ENGINEERING|INDUSTR|TECHNOLOG|ENTERPRISE",
             re.IGNORECASE,
         )
     return COMPANY_LINE
@@ -779,11 +791,13 @@ def process_doc(doc, service: str, rotate_deg: int, company_name: str):
                     do_logo=True,
                     do_text=True
                 )
-            elif not company_name.strip() and not text_was_redacted:
-                # Auto mode，且文字層完全找不到公司名稱
-                # （公司名稱可能以向量路徑繪製）→ OCR 精準遮蔽，保持向量畫質。
-                # OCR 不可用時才退回影像層 title block 整條遮蔽
-                if not redact_vector_page_ocr(doc[i]) and not TESSERACT_OK:
+            elif not company_name.strip():
+                # Auto mode：向量頁一律跑 OCR 補強。
+                # 文字層偵測只掃標題欄窄帶，公司名/電話常落在窄帶之外而漏抓；
+                # OCR 對整個標題欄做精準辨識，沿格線整格塗白並保持向量畫質。
+                ocr_hit = redact_vector_page_ocr(doc[i])
+                # OCR 不可用且文字層也沒抓到 → 退回影像層 title block 整條遮蔽
+                if not ocr_hit and not text_was_redacted and not TESSERACT_OK:
                     redact_scanned_page(doc, i,
                         company_name="",
                         do_logo=False,
