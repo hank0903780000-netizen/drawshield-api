@@ -74,7 +74,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "paddleocr-integrated"
+VERSION = "paddle-titleblock-crop"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -718,12 +718,19 @@ def paddle_redact_page(page) -> bool:
     SCALE = 3.0
     pix = page.get_pixmap(matrix=fitz.Matrix(SCALE, SCALE), alpha=False)
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    # 效能：公司名/客戶/電話都在標題欄（底部），只 OCR 底部 25% 區域即可，
+    # 速度比整頁快 4 倍；偵測框加回 y 偏移還原至全頁座標
+    full_h = img.size[1]
+    y_off = int(full_h * 0.75)
+    crop = img.crop((0, y_off, img.size[0], full_h))
     try:
-        res, _ = ocr(np.array(img))
+        res, _ = ocr(np.array(crop))
     except Exception:
         return False
     if not res:
         return False
+    # 還原裁切偏移
+    res = [([[p[0], p[1] + y_off] for p in box], text, score) for box, text, score in res]
     co_pat = _re_mod.compile(r'公司|集團|集团|有限|股份|HSIEH|KUN|CO[\s.,]*LTD|CORP|INC|LIMITED|GMBH', _re_mod.IGNORECASE)
     allb = []
     to_box = None
