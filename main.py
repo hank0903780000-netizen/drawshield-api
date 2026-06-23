@@ -15,6 +15,20 @@ try:
 except ImportError:
     TESSERACT_OK = False
 
+# PaddleOCR（透過 RapidOCR 跑 PP-OCR 模型）：中文公司名/客戶名辨識遠優於 Tesseract
+_RAPID_OCR = None
+try:
+    from rapidocr_onnxruntime import RapidOCR
+    RAPIDOCR_OK = True
+except ImportError:
+    RAPIDOCR_OK = False
+
+def get_rapidocr():
+    global _RAPID_OCR
+    if _RAPID_OCR is None and RAPIDOCR_OK:
+        _RAPID_OCR = RapidOCR()
+    return _RAPID_OCR
+
 app = FastAPI()
 
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
@@ -60,7 +74,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "tight-company-box"
+VERSION = "paddleocr-integrated"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -685,6 +699,83 @@ def _ocr_sensitive_boxes_single(img, expand=True, psm=11):
     return boxes
 
 
+import re as _re_mod
+
+_PADDLE_SENS = _re_mod.compile(
+    r'公司|集團|集团|有限|股份|企業社|株式会社|实业|實業|'
+    r'HSIEH|KUN|CO[\s.,]*LTD|CORP|INC|LIMITED|GMBH|ENGINEERING|'
+    r'電話|傳真|电话|传真|TEL|FAX',
+    _re_mod.IGNORECASE,
+)
+
+
+def paddle_redact_page(page) -> bool:
+    """用 PaddleOCR(RapidOCR) 偵測中文/英文公司名、電話、客戶(TO)欄位並真實刪除。
+    PaddleOCR 給的文字框已很精準，直接用該框做 redaction。回傳是否有遮蔽。"""
+    ocr = get_rapidocr()
+    if ocr is None:
+        return False
+    SCALE = 3.0
+    pix = page.get_pixmap(matrix=fitz.Matrix(SCALE, SCALE), alpha=False)
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    try:
+        res, _ = ocr(np.array(img))
+    except Exception:
+        return False
+    if not res:
+        return False
+    co_pat = _re_mod.compile(r'公司|集團|集团|有限|股份|HSIEH|KUN|CO[\s.,]*LTD|CORP|INC|LIMITED|GMBH', _re_mod.IGNORECASE)
+    allb = []
+    to_box = None
+    boxes = []
+    co_boxes = []
+    for box, text, score in res:
+        xs = [pt[0] for pt in box]
+        ys = [pt[1] for pt in box]
+        bb = (min(xs), min(ys), max(xs), max(ys))
+        allb.append((bb, text.strip()))
+        if text.strip().upper() == "TO":
+            to_box = bb
+        if _PADDLE_SENS.search(text):
+            boxes.append(bb)
+        if co_pat.search(text):
+            co_boxes.append(bb)
+    # 商標緊貼公司名左側：往左延伸一塊涵蓋 LOGO（高度約等於公司名行高）
+    for (x0, y0, x1, y1) in co_boxes:
+        ch = y1 - y0
+        lx1 = x0 - 2
+        lx0 = max(0, x0 - int(ch * 2.2))
+        if lx1 > lx0:
+            boxes.append((lx0, y0 - int(ch * 0.3), lx1, y1 + int(ch * 0.3)))
+    # 客戶欄位：TO 標籤右鄰格；TO 未讀到時取標題欄右上孤立英數短碼
+    if to_box:
+        c = [bb for bb, t in allb
+             if bb[0] >= to_box[2] - 5
+             and to_box[1] - 10 <= (bb[1] + bb[3]) / 2 <= to_box[3] + 10
+             and bb[0] - to_box[2] < img.size[0] * 0.15]
+        if c:
+            boxes.append(min(c, key=lambda b: b[0]))
+    else:
+        H, W = img.size[1], img.size[0]
+        tb = [(bb, t) for bb, t in allb
+              if bb[1] > H * 0.80 and bb[0] > W * 0.80
+              and _re_mod.fullmatch(r'[A-Za-z0-9]{2,8}', t)]
+        if tb:
+            boxes.append(min(tb, key=lambda x: x[0][1])[0])
+    # 標題欄實心黑塊（LOGO，PaddleOCR 偵測不到圖形）
+    boxes += dense_logo_boxes(img)
+    if not boxes:
+        return False
+    inv = ~page.rotation_matrix
+    for (x0, y0, x1, y1) in boxes:
+        r = fitz.Rect(x0 / SCALE, y0 / SCALE, x1 / SCALE, y1 / SCALE) * inv
+        r.normalize()
+        r.x0 -= 2; r.y0 -= 2; r.x1 += 2; r.y1 += 2
+        page.add_redact_annot(r, fill=(1, 1, 1))
+    page.apply_redactions()
+    return True
+
+
 def redact_vector_page_ocr(page) -> bool:
     """向量頁找不到文字層公司名時：渲染→OCR→在敏感行位置做「真實 redaction」。
     用 add_redact_annot + apply_redactions 真正刪除底下文字/向量（非畫白框遮蓋），
@@ -892,12 +983,13 @@ def process_doc(doc, service: str, rotate_deg: int, company_name: str):
                     do_text=True
                 )
             elif not company_name.strip():
-                # Auto mode：向量頁一律跑 OCR 補強。
-                # 文字層偵測只掃標題欄窄帶，公司名/電話常落在窄帶之外而漏抓；
-                # OCR 對整個標題欄做精準辨識，沿格線整格塗白並保持向量畫質。
-                ocr_hit = redact_vector_page_ocr(doc[i])
-                # OCR 不可用且文字層也沒抓到 → 退回影像層 title block 整條遮蔽
-                if not ocr_hit and not text_was_redacted and not TESSERACT_OK:
+                # Auto mode：向量頁跑 OCR 補強。優先 PaddleOCR（中文辨識佳）；
+                # 成功就不重跑 Tesseract（省一半時間）；PaddleOCR 無結果才退回。
+                paddle_hit = paddle_redact_page(doc[i])
+                ocr_hit = paddle_hit or redact_vector_page_ocr(doc[i])
+                # OCR 全不可用且文字層也沒抓到 → 退回影像層 title block 整條遮蔽
+                if (not ocr_hit and not text_was_redacted
+                        and not TESSERACT_OK and not RAPIDOCR_OK):
                     redact_scanned_page(doc, i,
                         company_name="",
                         do_logo=False,
