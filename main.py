@@ -60,8 +60,18 @@ API_PUBLIC_URL = os.environ.get(
     "https://enchanting-integrity-production-36f6.up.railway.app",
 )
 
+# ── Lemon Squeezy 設定（海外信用卡，美金計價，代收商模式）─────────────────
+# 正式上線時於 Railway 設定以下環境變數（從 Lemon Squeezy 後台取得）
+LS_API_KEY = os.environ.get("LEMONSQUEEZY_API_KEY", "")
+LS_STORE_ID = os.environ.get("LEMONSQUEEZY_STORE_ID", "")
+LS_VARIANT_ID = os.environ.get("LEMONSQUEEZY_VARIANT_ID", "")
+LS_WEBHOOK_SECRET = os.environ.get("LEMONSQUEEZY_WEBHOOK_SECRET", "")
+# 海外美金定價（分）
+PRICE_USD_CENTS = {"rotate": 300, "redact": 300, "full": 500}
+
 # 訂單暫存（單機記憶體即可；檔案 30 分鐘後自動刪，重啟遺失可接受）
 ECPAY_ORDERS = {}  # MerchantTradeNo -> {upload_ids, service, rotate_deg, company_name, paid, results}
+LS_ORDERS = {}     # order_ref -> {upload_ids, service, rotate_deg, company_name, paid, results}
 
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
 app.add_middleware(
@@ -74,7 +84,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "paddle-titleblock-crop"
+VERSION = "dual-payment-tw-intl"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -1207,6 +1217,116 @@ async def ecpay_order_status(trade_no: str):
 async def _expire_order(trade_no: str, delay: int):
     await asyncio.sleep(delay)
     ECPAY_ORDERS.pop(trade_no, None)
+
+
+# ── Lemon Squeezy 結帳（海外信用卡）──────────────────────────────────────────
+
+@app.post("/create-ls-checkout")
+async def create_ls_checkout(request: Request):
+    """建立 Lemon Squeezy 結帳，回傳 hosted checkout 網址。"""
+    import httpx
+    if not (LS_API_KEY and LS_STORE_ID and LS_VARIANT_ID):
+        raise HTTPException(503, "Lemon Squeezy 尚未設定")
+    body = await request.json()
+    upload_ids = body.get("upload_ids", [])
+    service = body.get("service", "rotate")
+    rotate_deg = int(body.get("rotate_deg", 90))
+    company_name = body.get("company_name", "")
+    if not upload_ids:
+        raise HTTPException(400, "未提供檔案")
+
+    unit = PRICE_USD_CENTS.get(service, 300)
+    total = unit * len(upload_ids)
+    order_ref = "LS" + uuid.uuid4().hex[:16]
+    LS_ORDERS[order_ref] = {
+        "upload_ids": upload_ids, "service": service,
+        "rotate_deg": rotate_deg, "company_name": company_name,
+        "paid": False, "results": None,
+    }
+    asyncio.create_task(_expire_ls_order(order_ref, 1800))
+
+    svc = SERVICE_NAMES.get(service, service)
+    payload = {
+        "data": {
+            "type": "checkouts",
+            "attributes": {
+                "custom_price": total,  # 美分，覆寫 variant 定價
+                "checkout_data": {
+                    "custom": {"order_ref": order_ref},
+                },
+                "product_options": {
+                    "name": f"DrawShield {svc} x{len(upload_ids)}",
+                    "redirect_url": f"{FRONTEND_URL}/?ls_order={order_ref}",
+                },
+            },
+            "relationships": {
+                "store": {"data": {"type": "stores", "id": str(LS_STORE_ID)}},
+                "variant": {"data": {"type": "variants", "id": str(LS_VARIANT_ID)}},
+            },
+        }
+    }
+    headers = {
+        "Authorization": f"Bearer {LS_API_KEY}",
+        "Accept": "application/vnd.api+json",
+        "Content-Type": "application/vnd.api+json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                "https://api.lemonsqueezy.com/v1/checkouts",
+                json=payload, headers=headers,
+            )
+        if resp.status_code >= 300:
+            raise HTTPException(502, f"Lemon Squeezy 建單失敗：{resp.text[:200]}")
+        url = resp.json()["data"]["attributes"]["url"]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Lemon Squeezy 連線失敗：{str(e)}")
+    return {"checkout_url": url, "order": order_ref}
+
+
+@app.post("/ls-webhook")
+async def ls_webhook(request: Request):
+    """Lemon Squeezy webhook：驗章後對已付款訂單做處理。"""
+    import hmac, hashlib, json as _json
+    raw = await request.body()
+    sig = request.headers.get("X-Signature", "")
+    if LS_WEBHOOK_SECRET:
+        digest = hmac.new(LS_WEBHOOK_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(digest, sig):
+            raise HTTPException(401, "簽章驗證失敗")
+    data = _json.loads(raw or b"{}")
+    event = (data.get("meta") or {}).get("event_name", "")
+    custom = (data.get("meta") or {}).get("custom_data") or {}
+    order_ref = custom.get("order_ref", "")
+    if event not in ("order_created", "order_paid"):
+        return {"ok": True}
+    status = ((data.get("data") or {}).get("attributes") or {}).get("status", "")
+    order = LS_ORDERS.get(order_ref)
+    if order and status == "paid" and not order["paid"]:
+        order["paid"] = True
+        try:
+            order["results"] = await _process_uploads(
+                order["upload_ids"], order["service"],
+                order["rotate_deg"], order["company_name"],
+            )
+        except Exception:
+            order["results"] = []
+    return {"ok": True}
+
+
+@app.get("/ls-order-status/{order_ref}")
+async def ls_order_status(order_ref: str):
+    order = LS_ORDERS.get(order_ref)
+    if order is None:
+        raise HTTPException(404, "訂單不存在或已過期")
+    return {"paid": order["paid"], "results": order["results"] or []}
+
+
+async def _expire_ls_order(order_ref: str, delay: int):
+    await asyncio.sleep(delay)
+    LS_ORDERS.pop(order_ref, None)
 
 
 # ── Process after payment ────────────────────────────────────────────────────
