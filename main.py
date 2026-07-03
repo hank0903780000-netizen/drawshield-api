@@ -67,7 +67,7 @@ LS_STORE_ID = os.environ.get("LEMONSQUEEZY_STORE_ID", "")
 LS_VARIANT_ID = os.environ.get("LEMONSQUEEZY_VARIANT_ID", "")
 LS_WEBHOOK_SECRET = os.environ.get("LEMONSQUEEZY_WEBHOOK_SECRET", "")
 # 海外美金定價（分）
-PRICE_USD_CENTS = {"rotate": 300, "redact": 300, "full": 500}
+PRICE_USD_CENTS = {"rotate": 400, "redact": 400, "full": 600}
 
 # 訂單暫存（單機記憶體即可；檔案 30 分鐘後自動刪，重啟遺失可接受）
 ECPAY_ORDERS = {}  # MerchantTradeNo -> {upload_ids, service, rotate_deg, company_name, paid, results}
@@ -84,7 +84,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "dual-payment-tw-intl"
+VERSION = "usd-price-4-6"
 
 
 async def auto_delete(path: str, delay: int = 60):
