@@ -1,3 +1,10 @@
+import sys
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass  # 部分環境（如舊版 Python）不支援 reconfigure，忽略即可
+
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -44,6 +51,11 @@ SERVICE_NAMES = {
     "rotate": "PDF 旋轉",
     "redact": "遮蔽公司名稱和 LOGO",
     "full": "旋轉 + 遮蔽公司名稱和 LOGO",
+}
+SERVICE_NAMES_EN = {
+    "rotate": "Rotate",
+    "redact": "Redact Name and Logo",
+    "full": "Rotate and Redact",
 }
 
 # ── 綠界 ECPay 全方位金流設定 ─────────────────────────────────────────────
@@ -1248,7 +1260,9 @@ async def create_ls_checkout(request: Request):
     }
     asyncio.create_task(_expire_ls_order(order_ref, 1800))
 
-    svc = SERVICE_NAMES.get(service, service)
+    # Lemon Squeezy 為海外/英文客群，結帳頁名稱一律用英文（避免容器 locale
+    # 非 UTF-8 時，中文字元在日誌/序列化路徑上觸發 UnicodeEncodeError）
+    svc = SERVICE_NAMES_EN.get(service, service)
     payload = {
         "data": {
             "type": "checkouts",
