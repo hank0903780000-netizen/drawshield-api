@@ -77,10 +77,19 @@ API_PUBLIC_URL = os.environ.get(
 
 # ── Lemon Squeezy 設定（海外信用卡，美金計價，代收商模式）─────────────────
 # 正式上線時於 Railway 設定以下環境變數（從 Lemon Squeezy 後台取得）
-LS_API_KEY = os.environ.get("LEMONSQUEEZY_API_KEY", "")
-LS_STORE_ID = os.environ.get("LEMONSQUEEZY_STORE_ID", "")
-LS_VARIANT_ID = os.environ.get("LEMONSQUEEZY_VARIANT_ID", "")
-LS_WEBHOOK_SECRET = os.environ.get("LEMONSQUEEZY_WEBHOOK_SECRET", "")
+def _clean_env(name: str) -> str:
+    """讀環境變數並清除複製貼上常帶入的不可見字元（智慧引號、零寬字元、
+    BOM、換行）。HTTP header 值只允許 ASCII/latin-1，殘留這些字元會讓
+    httpx 送出 Authorization header 時噴 UnicodeEncodeError。"""
+    v = os.environ.get(name, "")
+    v = v.strip().strip("​‌‍﻿‘’“”")
+    v = "".join(ch for ch in v if ch.isascii())
+    return v
+
+LS_API_KEY = _clean_env("LEMONSQUEEZY_API_KEY")
+LS_STORE_ID = _clean_env("LEMONSQUEEZY_STORE_ID")
+LS_VARIANT_ID = _clean_env("LEMONSQUEEZY_VARIANT_ID")
+LS_WEBHOOK_SECRET = _clean_env("LEMONSQUEEZY_WEBHOOK_SECRET")
 # 海外美金定價（分）
 PRICE_USD_CENTS = {"rotate": 400, "redact": 400, "full": 600}
 
@@ -99,7 +108,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "usd-price-4-6"
+VERSION = "ls-clean-env-fix"
 
 
 async def auto_delete(path: str, delay: int = 60):
