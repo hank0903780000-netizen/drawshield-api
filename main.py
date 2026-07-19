@@ -16,17 +16,20 @@ except ImportError:
     TESSERACT_OK = False
 
 # PaddleOCR（透過 RapidOCR 跑 PP-OCR 模型）：中文公司名/客戶名辨識遠優於 Tesseract
+# import 本身就會把 onnxruntime 載進記憶體，故完全延遲到第一次真正用 OCR 才做，
+# 避免啟動時（或簡單端點如 GET /）就佔用過多記憶體導致平台判定為無回應
 _RAPID_OCR = None
-try:
-    from rapidocr_onnxruntime import RapidOCR
-    RAPIDOCR_OK = True
-except ImportError:
-    RAPIDOCR_OK = False
+RAPIDOCR_OK = None  # None=尚未偵測, True/False=偵測結果
 
 def get_rapidocr():
-    global _RAPID_OCR
-    if _RAPID_OCR is None and RAPIDOCR_OK:
-        _RAPID_OCR = RapidOCR()
+    global _RAPID_OCR, RAPIDOCR_OK
+    if _RAPID_OCR is None and RAPIDOCR_OK is not False:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            _RAPID_OCR = RapidOCR()
+            RAPIDOCR_OK = True
+        except Exception:
+            RAPIDOCR_OK = False
     return _RAPID_OCR
 
 app = FastAPI()
