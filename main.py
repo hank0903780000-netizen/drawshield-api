@@ -11,7 +11,8 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 import fitz
 import stripe
-import uuid, os, asyncio, io
+import uuid, os, asyncio, io, json
+from datetime import datetime, timezone
 from pathlib import Path
 from PIL import Image, ImageDraw
 import numpy as np
@@ -108,7 +109,7 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "usd5-single-price"
+VERSION = "free-mode-feedback"
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -1160,6 +1161,66 @@ async def _process_uploads(upload_ids, service, rotate_deg, company_name):
         asyncio.create_task(auto_delete(str(out_path), 600))
         results.append({"upload_id": upload_id, "download_id": job_id})
     return results
+
+
+# ── 免費模式：直接處理（LS 金流審核中，暫時開放免費使用） ───────────────
+
+@app.post("/process-free")
+async def process_free(request: Request):
+    """免費模式：上傳後直接處理並回傳下載 ID，不經過金流。"""
+    body = await request.json()
+    upload_ids = body.get("upload_ids", [])
+    service = body.get("service", "rotate")
+    rotate_deg = int(body.get("rotate_deg", 90))
+    company_name = body.get("company_name", "")
+    if not upload_ids:
+        raise HTTPException(400, "未提供檔案 ID")
+    if len(upload_ids) > 20:
+        raise HTTPException(400, "單次最多 20 個檔案")
+    results = await _process_uploads(upload_ids, service, rotate_deg, company_name)
+    return {"results": results}
+
+
+# ── 使用者意見回饋 ────────────────────────────────────────────────────────
+
+FEEDBACK = []  # 最近的回饋（記憶體），同時寫入 log 與檔案
+FEEDBACK_FILE = UPLOAD_DIR / "feedback.jsonl"
+ADMIN_KEY = _clean_env("ADMIN_KEY") or "drawshield-admin"
+
+
+@app.post("/feedback")
+async def submit_feedback(request: Request):
+    body = await request.json()
+    rating = str(body.get("rating", ""))[:20]
+    message = str(body.get("message", ""))[:2000].strip()
+    contact = str(body.get("contact", ""))[:200].strip()
+    service = str(body.get("service", ""))[:20]
+    if not message and not rating:
+        raise HTTPException(400, "請填寫意見內容")
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "rating": rating,
+        "service": service,
+        "message": message,
+        "contact": contact,
+    }
+    FEEDBACK.append(entry)
+    del FEEDBACK[:-500]
+    try:
+        with open(FEEDBACK_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + chr(10))
+    except Exception:
+        pass
+    # Railway Deploy Logs 一定看得到
+    print("[FEEDBACK] " + json.dumps(entry, ensure_ascii=False), flush=True)
+    return {"ok": True}
+
+
+@app.get("/feedback-list")
+async def feedback_list(key: str = ""):
+    if key != ADMIN_KEY:
+        raise HTTPException(403, "forbidden")
+    return {"count": len(FEEDBACK), "items": list(reversed(FEEDBACK))}
 
 
 # ── 綠界 ECPay 結帳 ───────────────────────────────────────────────────────
