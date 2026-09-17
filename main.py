@@ -11,7 +11,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 import fitz
 import stripe
-import uuid, os, asyncio, io, json
+import uuid, os, asyncio, io, json, threading
 from datetime import datetime, timezone
 from pathlib import Path
 from PIL import Image, ImageDraw
@@ -109,7 +109,164 @@ app.add_middleware(
 
 UPLOAD_DIR = Path("/tmp/drawshield")
 UPLOAD_DIR.mkdir(exist_ok=True)
-VERSION = "free-mode-feedback"
+VERSION = "kb-learning-v1"
+
+# ── 知識庫：可累積的識圖經驗（只存文字，不存任何圖面） ──────────────────
+# 持久化位置：Railway Volume 掛在 /data 時自動使用，否則退回 /tmp（重啟會清空）
+_env_data = _clean_env("DATA_DIR")
+if _env_data:
+    DATA_DIR = Path(_env_data)
+elif Path("/data").is_dir():
+    DATA_DIR = Path("/data")
+else:
+    DATA_DIR = UPLOAD_DIR
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    DATA_DIR = UPLOAD_DIR
+
+KB_FILE = DATA_DIR / "kb.json"
+KB_PERSISTENT = DATA_DIR != UPLOAD_DIR
+_KB_LOCK = threading.Lock()
+_KB = None
+
+# 出廠預設保護詞：工程圖上絕不可刪的欄位標題與常見零件名詞
+KB_PROTECT_SEED = [
+    "圖名", "圖號", "品名", "件名", "材質", "數量", "比例", "單位", "尺寸",
+    "公差", "表面處理", "熱處理", "承認", "設計", "製圖", "審核", "日期", "版次",
+    "PART NAME", "PART NO", "DRAWING NO", "MATERIAL", "SCALE", "QTY", "REV",
+    "TITLE", "SIZE", "SHEET", "FINISH", "TOLERANCE", "DATE", "DRAWN", "CHECKED",
+]
+
+
+def _kb_default():
+    return {
+        "company_terms": {},   # 確認為公司名的字串 -> 出現次數
+        "protect_terms": {t: 99 for t in KB_PROTECT_SEED},  # 絕不遮蔽 -> 權重
+        "updated": "",
+    }
+
+
+def kb_load():
+    """讀取知識庫（記憶體快取）。"""
+    global _KB
+    if _KB is None:
+        data = _kb_default()
+        try:
+            if KB_FILE.exists():
+                saved = json.loads(KB_FILE.read_text(encoding="utf-8"))
+                for k in ("company_terms", "protect_terms"):
+                    if isinstance(saved.get(k), dict):
+                        data[k].update(saved[k])
+                data["updated"] = saved.get("updated", "")
+        except Exception as e:
+            print(f"[KB] load failed: {e}", flush=True)
+        _KB = data
+    return _KB
+
+
+def kb_save():
+    """原子寫入，避免半寫壞檔。"""
+    kb = kb_load()
+    kb["updated"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        tmp = KB_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(kb, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(str(tmp), str(KB_FILE))
+    except Exception as e:
+        print(f"[KB] save failed: {e}", flush=True)
+
+
+def _kb_norm(t: str) -> str:
+    """正規化比對用字串：去空白、全形轉半形、轉大寫。"""
+    if not t:
+        return ""
+    t = ''.join(c for c in t if ord(c) < 0xD800 or ord(c) > 0xDFFF)
+    out = []
+    for ch in t:
+        o = ord(ch)
+        if 0xFF01 <= o <= 0xFF5E:      # 全形英數 -> 半形
+            ch = chr(o - 0xFEE0)
+        elif o == 0x3000:
+            ch = " "
+        out.append(ch)
+    return ''.join(out).replace(" ", "").replace("　", "").upper()
+
+
+_KB_CO_SUFFIX = None
+
+
+def kb_is_protected(text: str) -> bool:
+    """這段文字是否被標記為「絕不可遮蔽」。
+
+    比對刻意保守，避免「保護詞剛好是公司名的一部分」導致該遮的沒遮：
+      1. 完全相同            -> 保護
+      2. 文字是保護詞的片段  -> 保護（OCR 只讀到半個欄位標題）
+      3. 保護詞包含在文字中  -> 僅當文字長度接近保護詞，且本身不像公司名
+    """
+    global _KB_CO_SUFFIX
+    n = _kb_norm(text)
+    if not n:
+        return False
+    if _KB_CO_SUFFIX is None:
+        import re as _re
+        _KB_CO_SUFFIX = _re.compile(
+            r"(?:股份)?有限公司|株式会社|CO\W{0,2}LTD|CORP|\bINC\b|\bLTD\b|GMBH",
+            _re.IGNORECASE)
+    looks_like_company = bool(_KB_CO_SUFFIX.search(n))
+    for term in kb_load()["protect_terms"]:
+        tn = _kb_norm(term)
+        if not tn:
+            continue
+        if n == tn or n in tn:
+            return True
+        if tn in n and not looks_like_company and len(n) <= len(tn) + 6:
+            return True
+    return False
+
+
+def kb_known_companies():
+    """已學會的公司名（依出現次數排序）。"""
+    ct = kb_load()["company_terms"]
+    return [t for t, _ in sorted(ct.items(), key=lambda kv: -kv[1])]
+
+
+def kb_learn_company(text: str, weight: int = 1):
+    """自動學習：被高信心規則判定為公司名的字串，記下來供日後比對。"""
+    n = ''.join(c for c in (text or "") if ord(c) < 0xD800 or ord(c) > 0xDFFF).strip()
+    if len(n) < 4 or len(n) > 60:
+        return
+    if kb_is_protected(n):
+        return
+    with _KB_LOCK:
+        kb = kb_load()
+        kb["company_terms"][n] = kb["company_terms"].get(n, 0) + weight
+        kb_save()
+
+
+def kb_teach(redact=None, protect=None):
+    """人工教學：使用者回報「這個沒遮到」/「這個不該遮」。"""
+    added = {"company_terms": [], "protect_terms": []}
+    with _KB_LOCK:
+        kb = kb_load()
+        for t in (redact or []):
+            t = (t or "").strip()
+            if 1 < len(t) <= 60:
+                kb["company_terms"][t] = kb["company_terms"].get(t, 0) + 10
+                kb["protect_terms"].pop(t, None)
+                added["company_terms"].append(t)
+        for t in (protect or []):
+            t = (t or "").strip()
+            if 1 < len(t) <= 60:
+                kb["protect_terms"][t] = kb["protect_terms"].get(t, 0) + 10
+                kb["company_terms"].pop(t, None)
+                added["protect_terms"].append(t)
+        if added["company_terms"] or added["protect_terms"]:
+            kb_save()
+    return added
+
+
+
 
 
 async def auto_delete(path: str, delay: int = 60):
@@ -180,7 +337,11 @@ def apply_text_redaction(doc, company_name: str) -> bool:
                     # 全頁掃描縮寫電話 / 完整英文公司名（不限窄帶，整 span 塗白）
                     elif (phone_abbr_pattern.search(clean_sp)
                             or english_co_pattern.search(clean_sp)):
+                        if kb_is_protected(clean_sp):
+                            continue
                         page.add_redact_annot(fitz.Rect(span["bbox"]), fill=(1, 1, 1))
+                        if english_co_pattern.search(clean_sp):
+                            kb_learn_company(clean_sp.strip())
         # 「機 密」拆成兩個相鄰 span 的戳記：機+密 距離近時一併遮蔽
         mi_spans, ji_spans = [], []
         for b in page.get_text("dict")["blocks"]:
@@ -256,7 +417,11 @@ def apply_text_redaction(doc, company_name: str) -> bool:
         # Auto mode: no company name → try to detect English company name pattern
         # (CJK text has surrogate escapes on Linux so English detection is more reliable)
         auto_cluster_rects = []  # CJK 公司名群集（自動模式直接遮蔽的 bbox）
-        if not names:
+        auto_mode = not names
+        # 知識庫學會的公司名只做「完整字串精確比對」，不進入 names
+        # （names 走 text_matches 模糊比對，混入大量字串會造成誤遮）
+        learned_names = kb_known_companies()[:300] if auto_mode else []
+        if auto_mode:
             for span in all_spans:
                 clean_t = ''.join(c for c in span["text"] if ord(c) < 0xD800 or ord(c) > 0xDFFF).strip()
                 if english_co_pattern.search(clean_t):
@@ -306,10 +471,14 @@ def apply_text_redaction(doc, company_name: str) -> bool:
                 chs = [spans_left[k] for k in chain]
                 t_fwd = ''.join(clean_str(c["text"]) for c in sorted(chs, key=lambda c: (c["bbox"][1], c["bbox"][0]))).replace(" ", "")
                 t_rev = ''.join(clean_str(c["text"]) for c in sorted(chs, key=lambda c: (-c["bbox"][1], c["bbox"][0]))).replace(" ", "")
-                if cjk_suffix.search(t_fwd) or cjk_suffix.search(t_rev):
+                hit = t_fwd if cjk_suffix.search(t_fwd) else (t_rev if cjk_suffix.search(t_rev) else "")
+                if hit:
+                    if kb_is_protected(hit):
+                        continue  # 知識庫標記為不可遮蔽（例如零件名、欄位標題）
                     xs = [c["bbox"][0] for c in chs] + [c["bbox"][2] for c in chs]
                     ys = [c["bbox"][1] for c in chs] + [c["bbox"][3] for c in chs]
                     auto_cluster_rects.append(fitz.Rect(min(xs), min(ys), max(xs), max(ys)))
+                    kb_learn_company(hit)  # 高信心命中 -> 存入知識庫
 
         # 找到匹配的 span，並擴展遮蔽同一欄位（相同 x 範圍）的所有文字
         matched_x_bands = []  # [(x0, x1, y0, y1)] 已匹配的欄位範圍
@@ -317,6 +486,14 @@ def apply_text_redaction(doc, company_name: str) -> bool:
         for rect in auto_cluster_rects:
             page.add_redact_annot(rect, fill=(1, 1, 1))
             any_redacted = True
+        for lname in learned_names:
+            if len(lname) < 4 or kb_is_protected(lname):
+                continue
+            for rect in page.search_for(lname):   # 精確比對，找不到就略過
+                page.add_redact_annot(rect, fill=(1, 1, 1))
+                matched_x_bands.append((rect.x0 - 5, rect.x1 + 5, rect.y0, rect.y1))
+                any_redacted = True
+
         for name in names:
             # 方法一：search_for（英文/簡單文字效果好）
             rects = page.search_for(name)
@@ -345,6 +522,8 @@ def apply_text_redaction(doc, company_name: str) -> bool:
         # 遮蔽同一欄位內所有其他文字（英文名稱等）：x 和 y 都必須重疊
         for span in all_spans:
             sx0, sy0, sx1, sy1 = span["bbox"]
+            if kb_is_protected(span["text"]):
+                continue  # 知識庫保護：零件名 / 欄位標題不得被鄰欄擴散遮蔽
             for bx0, bx1, by0, by1 in matched_x_bands:
                 # span 的 x 範圍與匹配欄位重疊，且 y 範圍也重疊
                 if sx0 <= bx1 and sx1 >= bx0 and sy0 <= by1 and sy1 >= by0:
@@ -1195,14 +1374,19 @@ async def submit_feedback(request: Request):
     message = str(body.get("message", ""))[:2000].strip()
     contact = str(body.get("contact", ""))[:200].strip()
     service = str(body.get("service", ""))[:20]
-    if not message and not rating:
+    # 教學欄位：使用者指出哪些字「不該被遮」/「應該要遮」
+    wrong_redacted = [str(x)[:60] for x in (body.get("wrong_redacted") or [])][:20]
+    missed = [str(x)[:60] for x in (body.get("missed") or [])][:20]
+    if not message and not rating and not wrong_redacted and not missed:
         raise HTTPException(400, "請填寫意見內容")
+    taught = kb_teach(redact=missed, protect=wrong_redacted) if (wrong_redacted or missed) else None
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "rating": rating,
         "service": service,
         "message": message,
         "contact": contact,
+        "taught": taught,
     }
     FEEDBACK.append(entry)
     del FEEDBACK[:-500]
@@ -1213,7 +1397,55 @@ async def submit_feedback(request: Request):
         pass
     # Railway Deploy Logs 一定看得到
     print("[FEEDBACK] " + json.dumps(entry, ensure_ascii=False), flush=True)
-    return {"ok": True}
+    return {"ok": True, "taught": taught}
+
+
+@app.get("/kb")
+async def kb_view(key: str = ""):
+    """檢視知識庫內容。"""
+    if key != ADMIN_KEY:
+        raise HTTPException(403, "forbidden")
+    kb = kb_load()
+    return {
+        "persistent": KB_PERSISTENT,
+        "path": str(KB_FILE),
+        "updated": kb["updated"],
+        "company_count": len(kb["company_terms"]),
+        "protect_count": len(kb["protect_terms"]),
+        "company_terms": dict(sorted(kb["company_terms"].items(), key=lambda kv: -kv[1])),
+        "protect_terms": dict(sorted(kb["protect_terms"].items(), key=lambda kv: -kv[1])),
+    }
+
+
+@app.post("/kb/teach")
+async def kb_teach_endpoint(request: Request):
+    """人工教學：{"redact":["要遮的字"],"protect":["不該遮的字"]}"""
+    body = await request.json()
+    if body.get("key", "") != ADMIN_KEY:
+        raise HTTPException(403, "forbidden")
+    added = kb_teach(redact=body.get("redact") or [], protect=body.get("protect") or [])
+    print("[KB-TEACH] " + json.dumps(added, ensure_ascii=False), flush=True)
+    return {"ok": True, "added": added, "persistent": KB_PERSISTENT}
+
+
+@app.post("/kb/forget")
+async def kb_forget(request: Request):
+    """移除學錯的詞：{"company":["..."],"protect":["..."]}"""
+    body = await request.json()
+    if body.get("key", "") != ADMIN_KEY:
+        raise HTTPException(403, "forbidden")
+    removed = []
+    with _KB_LOCK:
+        kb = kb_load()
+        for t in (body.get("company") or []):
+            if kb["company_terms"].pop(t, None) is not None:
+                removed.append(t)
+        for t in (body.get("protect") or []):
+            if kb["protect_terms"].pop(t, None) is not None:
+                removed.append(t)
+        if removed:
+            kb_save()
+    return {"ok": True, "removed": removed}
 
 
 @app.get("/feedback-list")
